@@ -5,6 +5,7 @@ import Testing
 @Test
 func defaultPresetsAndSafetyLimits() {
     var settings = AppSettings()
+    #expect(settings.showLiquidTemperatureInMenuBar == false)
     #expect(settings.presets[.quiet] == CoolingPreset(fanDuty: 35, pumpDuty: 60))
     #expect(settings.presets[.daily] == CoolingPreset(fanDuty: 50, pumpDuty: 70))
     #expect(settings.presets[.performance] == CoolingPreset(fanDuty: 75, pumpDuty: 90))
@@ -15,6 +16,42 @@ func defaultPresetsAndSafetyLimits() {
     settings.sanitize()
     #expect(settings.manualFanDuty == [30, 100, 30])
     #expect(settings.manualPumpDuty == 50)
+}
+
+@Test
+func olderSettingsDecodeWithoutMenuBarPreference() throws {
+    var object = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(AppSettings())) as? [String: Any]
+    )
+    object.removeValue(forKey: "showLiquidTemperatureInMenuBar")
+
+    var decoded = try JSONDecoder().decode(
+        AppSettings.self,
+        from: JSONSerialization.data(withJSONObject: object)
+    )
+    decoded.sanitize()
+
+    #expect(decoded.showLiquidTemperatureInMenuBar == false)
+    #expect(decoded.presets[.performance] == CoolingPreset(fanDuty: 75, pumpDuty: 90))
+}
+
+@Test @MainActor
+func menuBarShowsOnlyTemperaturesSelectedByTheUser() {
+    let defaultText = AppModel.formatMenuBarText(
+        cpuTemperature: 58.2,
+        liquidTemperature: 38.2,
+        showLiquidTemperature: false
+    )
+    #expect(defaultText == "CPU 58°")
+
+    let liquidText = AppModel.formatMenuBarText(
+        cpuTemperature: 58.2,
+        liquidTemperature: 38.2,
+        showLiquidTemperature: true
+    )
+    #expect(liquidText.contains("CPU 58°"))
+    #expect(liquidText.contains("38°"))
+    #expect(!liquidText.contains("RPM"))
 }
 
 @Test

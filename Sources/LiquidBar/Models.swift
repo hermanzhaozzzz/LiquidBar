@@ -1,5 +1,11 @@
 import Foundation
 
+enum AppVersion {
+    static let current = Bundle.main.object(
+        forInfoDictionaryKey: "CFBundleShortVersionString"
+    ) as? String ?? "development"
+}
+
 enum PresetID: String, Codable, CaseIterable, Identifiable {
     case quiet
     case daily
@@ -26,6 +32,8 @@ struct AlertThresholds: Codable, Equatable {
 
 struct AppSettings: Codable, Equatable {
     var launchAtLogin = true
+    // Optional for backward-compatible decoding of settings written by older versions.
+    var showLiquidTemperatureInMenuBar: Bool? = false
     var notificationsEnabled = false
     var criticalSoundEnabled = true
     var automaticEmergencyBoost = false
@@ -43,6 +51,7 @@ struct AppSettings: Codable, Equatable {
     var manualPumpDuty = 70
 
     mutating func sanitize() {
+        showLiquidTemperatureInMenuBar = showLiquidTemperatureInMenuBar ?? false
         fanNames = Array((fanNames + ["Fan 1", "Fan 2", "Fan 3"]).prefix(3))
         manualFanDuty = Array((manualFanDuty + [50, 50, 50]).prefix(3)).map {
             min(100, max(30, $0))
@@ -86,9 +95,6 @@ struct DeviceSnapshot: Codable, Equatable {
         connected: false
     )
 
-    var maximumFanRPM: Int? {
-        fanRPM.compactMap { $0 }.max()
-    }
 }
 
 struct HistorySample: Codable, Identifiable, Equatable {

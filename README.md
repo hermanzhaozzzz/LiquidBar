@@ -7,7 +7,7 @@ Hackintosh + NZXT cooling setup. It prioritizes low overhead, predictable
 hardware access, and a single-level interface inspired by the clarity of iStat
 Menus.
 
-> Version 0.1.3 is tested only on the hardware listed below. The architecture is
+> Version 0.1.4 is tested only on the hardware listed below. The architecture is
 > extensible, but other Macs and liquidctl devices are not currently supported.
 
 ## Tested setup
@@ -21,7 +21,7 @@ Menus.
 
 ## Features
 
-- Compact `CPU 52°  F 810  P 2158` menu-bar status
+- Compact `CPU 52°` menu-bar status with optional liquid temperature
 - CPU temperature from VirtualSMC and coolant/fan/pump data from liquidctl
 - Independent Fan 1/2/3 and pump sliders with safe minimums
 - Linked-fan mode and Quiet, Daily, Performance, and Full presets
@@ -57,7 +57,7 @@ swift test
 ```
 
 The app bundle is written to `dist/LiquidBar.app` and ad-hoc signed for local
-use. No public binary is shipped in version 0.1.3 because the project does not
+use. No public binary is shipped in version 0.1.4 because the project does not
 yet use a Developer ID certificate.
 
 Install and launch it:

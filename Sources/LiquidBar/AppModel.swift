@@ -54,10 +54,25 @@ final class AppModel: ObservableObject {
     }
 
     var menuBarText: String {
+        Self.formatMenuBarText(
+            cpuTemperature: cpuTemperature,
+            liquidTemperature: snapshot.liquidTemperature,
+            showLiquidTemperature: settingsStore.value.showLiquidTemperatureInMenuBar == true
+        )
+    }
+
+    static func formatMenuBarText(
+        cpuTemperature: Double?,
+        liquidTemperature: Double?,
+        showLiquidTemperature: Bool
+    ) -> String {
         let cpu = cpuTemperature.map { String(format: "%.0f°", $0) } ?? "--°"
-        let fan = snapshot.maximumFanRPM.map(String.init) ?? "--"
-        let pump = snapshot.pumpRPM.map(String.init) ?? "--"
-        return "CPU \(cpu)  F \(fan)  P \(pump)"
+        var components = ["CPU \(cpu)"]
+        if showLiquidTemperature {
+            let liquid = liquidTemperature.map { String(format: "%.0f°", $0) } ?? "--°"
+            components.append("\(L10n.text("liquid")) \(liquid)")
+        }
+        return components.joined(separator: "  ")
     }
 
     var chartSamples: [HistorySample] {
@@ -190,7 +205,7 @@ final class AppModel: ObservableObject {
 
     func copyDiagnostics() {
         let report = """
-        LiquidBar 0.1.3
+        LiquidBar \(AppVersion.current)
         macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)
         CPU: \(cpuTemperature.map { String(format: "%.1f °C", $0) } ?? "unavailable")
         Liquid: \(snapshot.liquidTemperature.map { String(format: "%.1f °C", $0) } ?? "unavailable")

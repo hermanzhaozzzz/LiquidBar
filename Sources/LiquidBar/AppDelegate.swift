@@ -62,6 +62,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 DispatchQueue.main.async { self?.updateStatusItem() }
             }
             .store(in: &cancellables)
+
+        model.settingsStore.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in
+                DispatchQueue.main.async { self?.updateStatusItem() }
+            }
+            .store(in: &cancellables)
     }
 
     private func observeLifecycle() {
