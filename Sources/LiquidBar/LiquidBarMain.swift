@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 
 @main
 enum LiquidBarMain {
@@ -10,6 +11,19 @@ enum LiquidBarMain {
             }
             fputs("CPU temperature unavailable\n", stderr)
             exit(2)
+        }
+        if CommandLine.arguments.contains("--login-item-status") {
+            let status = SMAppService.mainApp.status
+            let name: String
+            switch status {
+            case .notRegistered: name = "notRegistered"
+            case .enabled: name = "enabled"
+            case .requiresApproval: name = "requiresApproval"
+            case .notFound: name = "notFound"
+            @unknown default: name = "unknown"
+            }
+            print("\(name) (\(status.rawValue))")
+            return
         }
         let application = NSApplication.shared
         let delegate = AppDelegate()

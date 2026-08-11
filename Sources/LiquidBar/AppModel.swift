@@ -190,7 +190,7 @@ final class AppModel: ObservableObject {
 
     func copyDiagnostics() {
         let report = """
-        LiquidBar 0.1.0
+        LiquidBar 0.1.1
         macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)
         CPU: \(cpuTemperature.map { String(format: "%.1f °C", $0) } ?? "unavailable")
         Liquid: \(snapshot.liquidTemperature.map { String(format: "%.1f °C", $0) } ?? "unavailable")
@@ -384,10 +384,12 @@ final class AppModel: ObservableObject {
     private func configureLaunchAtLogin(enabled: Bool) {
         do {
             if enabled {
-                if SMAppService.mainApp.status == .notRegistered {
+                if SMAppService.mainApp.status == .notRegistered ||
+                    SMAppService.mainApp.status == .notFound {
                     try SMAppService.mainApp.register()
                 }
-            } else if SMAppService.mainApp.status != .notRegistered {
+            } else if SMAppService.mainApp.status == .enabled ||
+                        SMAppService.mainApp.status == .requiresApproval {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
