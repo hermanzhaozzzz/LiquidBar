@@ -190,7 +190,7 @@ final class AppModel: ObservableObject {
 
     func copyDiagnostics() {
         let report = """
-        LiquidBar 0.1.2
+        LiquidBar 0.1.3
         macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)
         CPU: \(cpuTemperature.map { String(format: "%.1f °C", $0) } ?? "unavailable")
         Liquid: \(snapshot.liquidTemperature.map { String(format: "%.1f °C", $0) } ?? "unavailable")

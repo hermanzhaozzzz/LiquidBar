@@ -7,7 +7,7 @@ Hackintosh + NZXT cooling setup. It prioritizes low overhead, predictable
 hardware access, and a single-level interface inspired by the clarity of iStat
 Menus.
 
-> Version 0.1.2 is tested only on the hardware listed below. The architecture is
+> Version 0.1.3 is tested only on the hardware listed below. The architecture is
 > extensible, but other Macs and liquidctl devices are not currently supported.
 
 ## Tested setup
@@ -57,7 +57,7 @@ swift test
 ```
 
 The app bundle is written to `dist/LiquidBar.app` and ad-hoc signed for local
-use. No public binary is shipped in version 0.1.2 because the project does not
+use. No public binary is shipped in version 0.1.3 because the project does not
 yet use a Developer ID certificate.
 
 Install and launch it:
