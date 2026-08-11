@@ -395,7 +395,7 @@ struct SettingsView: View {
                         Button(L10n.text("copyDiagnostics"), action: model.copyDiagnostics)
                         Button(L10n.text("clearLog"), action: model.clearLog)
                         Spacer()
-                        Text("LiquidBar 0.1.1")
+                        Text("LiquidBar 0.1.2")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(6)
