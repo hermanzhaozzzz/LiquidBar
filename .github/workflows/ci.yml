@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+      - name: Validate helper
+        run: python3 -m py_compile Resources/device_helper.py
+      - name: Validate documentation links
+        run: |
+          test -f README.md
+          test -f README.zh-CN.md
+          grep -q 'README.zh-CN.md' README.md
+          grep -q 'README.md' README.zh-CN.md
