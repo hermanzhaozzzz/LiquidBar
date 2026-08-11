@@ -340,6 +340,10 @@ struct SettingsView: View {
                 GroupBox(L10n.text("status")) {
                     VStack(alignment: .leading, spacing: 10) {
                         Toggle(L10n.text("launchAtLogin"), isOn: launchBinding)
+                        Toggle(
+                            L10n.text("showLiquidTemperatureInMenuBar"),
+                            isOn: showLiquidTemperatureInMenuBarBinding
+                        )
                         if model.loginItemStatus == .requiresApproval {
                             Text(L10n.text("loginNeedsApproval"))
                                 .font(.caption).foregroundStyle(.orange)
@@ -395,7 +399,7 @@ struct SettingsView: View {
                         Button(L10n.text("copyDiagnostics"), action: model.copyDiagnostics)
                         Button(L10n.text("clearLog"), action: model.clearLog)
                         Spacer()
-                        Text("LiquidBar 0.1.3")
+                        Text("LiquidBar \(AppVersion.current)")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(6)
@@ -417,6 +421,13 @@ struct SettingsView: View {
         Binding(
             get: { store.value.notificationsEnabled },
             set: { model.updateNotifications(enabled: $0) }
+        )
+    }
+
+    private var showLiquidTemperatureInMenuBarBinding: Binding<Bool> {
+        Binding(
+            get: { store.value.showLiquidTemperatureInMenuBar == true },
+            set: { store.value.showLiquidTemperatureInMenuBar = $0 }
         )
     }
 
