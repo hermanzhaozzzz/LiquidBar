@@ -35,3 +35,12 @@ struct ThermalPolicy {
         }
     }
 }
+
+extension ThermalPolicy {
+    static func freshReading(_ value: Double?, sampledAt: Date?, now: Date = Date(), maximumAge: TimeInterval = 6) -> Double? {
+        guard let value, value.isFinite, let sampledAt,
+              now.timeIntervalSince(sampledAt) >= 0,
+              now.timeIntervalSince(sampledAt) <= maximumAge else { return nil }
+        return value
+    }
+}

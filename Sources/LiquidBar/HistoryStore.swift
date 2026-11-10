@@ -15,13 +15,15 @@ final class HistoryStore: ObservableObject {
         load()
     }
 
-    func append(cpuTemperature: Double?, snapshot: DeviceSnapshot) {
+    func append(cpuTemperature: Double?, snapshot: DeviceSnapshot, gpu: GPUReading? = nil) {
         let sample = HistorySample(
             timestamp: Date(),
             cpuTemperature: cpuTemperature,
             liquidTemperature: snapshot.liquidTemperature,
             fanRPM: snapshot.fanRPM,
-            pumpRPM: snapshot.pumpRPM
+            pumpRPM: snapshot.pumpRPM,
+            gpuTemperature: gpu?.temperature,
+            gpuFanRPM: gpu?.fanRPM
         )
         samples.append(sample)
         prune()

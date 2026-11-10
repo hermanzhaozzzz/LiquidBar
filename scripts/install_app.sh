@@ -20,7 +20,31 @@ if [[ -L "$destination_app" ]]; then
 fi
 
 if [[ -e "$destination_app" ]]; then
-  /usr/bin/osascript -e 'tell application "LiquidBar" to quit' >/dev/null 2>&1 || true
+  # Address only an already-running process. `tell application ... to quit`
+  # can launch a stopped old app, which would reapply its saved device settings.
+  /usr/bin/osascript -l JavaScript - "$destination_app" <<'JXA'
+ObjC.import("AppKit");
+function run(argv) {
+    const apps = $.NSWorkspace.sharedWorkspace.runningApplications;
+    for (let index = 0; index < apps.count; index++) {
+        const app = apps.objectAtIndex(index);
+        if (ObjC.unwrap(app.bundleURL.path) === argv[0]) {
+            app.terminate;
+        }
+    }
+}
+JXA
+  # Include workers left behind by a crashed parent. Never replace their bundle
+  # while safety restoration is in progress, or force an app that cancelled quit.
+  process_pattern='/Applications/LiquidBar[.]app/Contents/(MacOS/LiquidBar|Resources/device_helper[.]py)( |$)'
+  deadline=$((SECONDS + 15))
+  while /usr/bin/pgrep -f "$process_pattern" >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      print -u2 "LiquidBar or its device helper is still running. Installation stopped; finish its safety shutdown and retry."
+      exit 1
+    fi
+    /bin/sleep 0.2
+  done
   /bin/rm -rf -- "$destination_app"
 fi
 /usr/bin/ditto "$source_app" "$destination_app"

@@ -28,7 +28,10 @@ private struct HelperResponse: Decodable {
     let error: String?
 }
 
-private struct HelperData: Decodable {
+struct HelperData: Decodable {
+    let devices: [String: DeviceCapability]?
+    let errors: [String: String]?
+    let applied: Bool?
     let liquidTemperature: Double?
     let pumpRPM: Int?
     let pumpDuty: Int?
@@ -38,6 +41,7 @@ private struct HelperData: Decodable {
     let noiseLevel: Int?
 
     enum CodingKeys: String, CodingKey {
+        case devices, errors, applied
         case liquidTemperature = "liquid_temperature"
         case pumpRPM = "pump_rpm"
         case pumpDuty = "pump_duty"
@@ -46,6 +50,21 @@ private struct HelperData: Decodable {
         case fanModes = "fan_modes"
         case noiseLevel = "noise_level"
     }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Status contains capability objects; apply returns per-device acknowledgements.
+        devices = try? c.decode([String: DeviceCapability].self, forKey: .devices)
+        errors = try c.decodeIfPresent([String: String].self, forKey: .errors)
+        applied = try c.decodeIfPresent(Bool.self, forKey: .applied)
+        liquidTemperature = try c.decodeIfPresent(Double.self, forKey: .liquidTemperature)
+        pumpRPM = try c.decodeIfPresent(Int.self, forKey: .pumpRPM)
+        pumpDuty = try c.decodeIfPresent(Int.self, forKey: .pumpDuty)
+        fanRPM = try c.decodeIfPresent([Int?].self, forKey: .fanRPM)
+        fanDuty = try c.decodeIfPresent([Int?].self, forKey: .fanDuty)
+        fanModes = try c.decodeIfPresent([String?].self, forKey: .fanModes)
+        noiseLevel = try c.decodeIfPresent(Int.self, forKey: .noiseLevel)
+    }
 }
 
 actor LiquidctlService {
@@ -53,9 +72,23 @@ actor LiquidctlService {
     private var input: FileHandle?
     private var output: FileHandle?
     private var nextRequestID = 1
+    private var curveMayBeArmed = false
+    private var retiringProcess: Process?
+    private var retiringOutput: FileHandle?
+    private var retiringCurveArmed = false
+    private var retirementFailure: String?
+    private let executableOverride: URL?
+    private let helperOverride: URL?
+    private let requestTimeout: TimeInterval
+
+    init(executable: URL? = nil, helper: URL? = nil, timeout: TimeInterval = 12) {
+        executableOverride = executable
+        helperOverride = helper
+        requestTimeout = timeout
+    }
 
     deinit {
-        process?.terminate()
+        try? input?.close()
     }
 
     func status() throws -> DeviceSnapshot {
@@ -72,7 +105,9 @@ actor LiquidctlService {
             fanDuty: normalized(data.fanDuty),
             fanModes: normalized(data.fanModes),
             noiseLevel: data.noiseLevel,
-            connected: true
+            connected: data.devices?.values.contains(where: { $0.connected }) ?? false,
+            devices: data.devices ?? [:],
+            errors: data.errors ?? [:]
         )
     }
 
@@ -81,6 +116,7 @@ actor LiquidctlService {
             "action": "set", "device": "smart", "channel": "fan\(index)",
             "duty": min(100, max(30, duty)),
         ])
+        curveMayBeArmed = false
     }
 
     func setPump(duty: Int) throws {
@@ -90,12 +126,38 @@ actor LiquidctlService {
         ])
     }
 
-    func apply(fans: [Int], pump: Int) throws {
+    func apply(fans: [Int]?, pump: Int?, curve: Bool = false) throws {
+        var payload: [String: Any] = ["action": "apply", "curve": curve]
+        if let fans { payload["fans"] = fans.map { min(100, max(30, $0)) } }
+        if let pump { payload["pump"] = min(100, max(50, pump)) }
+        _ = try request(payload)
+        if fans != nil { curveMayBeArmed = curve }
+    }
+
+    func disarmCurve() throws {
+        _ = try request(["action": "curve_disarm"])
+        curveMayBeArmed = false
+    }
+
+    func setLighting(device: String, settings: LightingSettings) throws {
         _ = try request([
-            "action": "apply",
-            "fans": fans.map { min(100, max(30, $0)) },
-            "pump": min(100, max(50, pump)),
+            "action": "lighting", "device": device, "channel": settings.channel,
+            "mode": settings.mode, "colors": [settings.rgb], "speed": "normal",
         ])
+    }
+
+    func updateDisplay(enabled: Bool, temperature: Double?, utilization: Double?, power: Double?, unit: String) throws {
+        var payload: [String: Any] = ["action": "display", "enabled": enabled, "unit": unit]
+        if enabled {
+            guard let temperature, let utilization, let power,
+                  temperature.isFinite, utilization.isFinite, power.isFinite else {
+                throw LiquidctlError.response(L10n.text("displayTelemetryUnavailable"))
+            }
+            payload["temperature"] = temperature
+            payload["utilization"] = utilization
+            payload["power"] = power
+        }
+        _ = try request(payload)
     }
 
     func identifyFan(index: Int) throws {
@@ -103,22 +165,53 @@ actor LiquidctlService {
     }
 
     func reconnect() throws {
-        stop()
+        try stop()
         _ = try request(["action": "initialize"])
     }
 
-    func stop() {
-        if process?.isRunning == true {
-            _ = try? request(["action": "shutdown"])
-            process?.terminate()
-        }
-        process = nil
+    func stop() throws {
+        // A failed/timed-out request may still be executing. Never exchange another
+        // command on the same pipe or replay a write whose outcome is unknown.
+        try? input?.close()
         input = nil
+        if let process {
+            retiringProcess = process
+            retiringOutput = output
+            retiringCurveArmed = curveMayBeArmed
+            // An armed worker must finish its own full-speed writes on EOF.
+            // Retain it and refuse a competing session if those writes block.
+            if !curveMayBeArmed && process.isRunning { process.terminate() }
+        } else if output != nil { try? output?.close() }
+        process = nil
         output = nil
+        try awaitRetirement(timeout: 2)
+    }
+
+    private func awaitRetirement(timeout: TimeInterval) throws {
+        if let retirementFailure { throw LiquidctlError.response(retirementFailure) }
+        guard let retiringProcess else { return }
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while retiringProcess.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
+            usleep(10_000)
+        }
+        guard !retiringProcess.isRunning else {
+            throw LiquidctlError.response("The previous USB helper is still finishing its safety shutdown; no new control session has started.")
+        }
+        retiringProcess.waitUntilExit()
+        try? retiringOutput?.close()
+        retiringOutput = nil
+        self.retiringProcess = nil
+        if retiringCurveArmed && (retiringProcess.terminationReason != .exit || retiringProcess.terminationStatus != 0) {
+            retirementFailure = "The USB helper did not confirm its full-speed fallback. Check cooling before restarting LiquidBar."
+            throw LiquidctlError.response(retirementFailure!)
+        }
+        curveMayBeArmed = false
+        retiringCurveArmed = false
     }
 
     private func request(_ values: [String: Any]) throws -> HelperResponse {
         try ensureRunning()
+        if values["curve"] as? Bool == true { curveMayBeArmed = true }
         guard let input, let output else { throw LiquidctlError.disconnected }
 
         let requestID = nextRequestID
@@ -126,24 +219,34 @@ actor LiquidctlService {
         var payload = values
         payload["id"] = requestID
         let data = try JSONSerialization.data(withJSONObject: payload)
-        try input.write(contentsOf: data)
-        try input.write(contentsOf: Data([0x0a]))
-
-        let line = try readLine(from: output.fileDescriptor, timeout: 8)
-        let response = try JSONDecoder().decode(HelperResponse.self, from: line)
-        guard response.id == requestID else {
-            throw LiquidctlError.response("liquidctl helper returned an unexpected request id")
+        let response: HelperResponse
+        do {
+            try input.write(contentsOf: data + Data([0x0a]))
+            let line = try readLine(from: output.fileDescriptor, timeout: requestTimeout)
+            response = try JSONDecoder().decode(HelperResponse.self, from: line)
+            guard response.id == requestID else {
+                throw LiquidctlError.response("liquidctl helper returned an unexpected request id; session reset")
+            }
+        } catch {
+            do { try stop() }
+            catch { throw error }
+            throw error
         }
         guard response.ok else {
             throw LiquidctlError.response(response.error ?? "unknown liquidctl error")
+        }
+        if values["action"] as? String != "status", let errors = response.data?.errors, !errors.isEmpty {
+            throw LiquidctlError.response(errors.keys.sorted().map { "\($0): \(errors[$0]!)" }.joined(separator: "; "))
         }
         return response
     }
 
     private func ensureRunning() throws {
         if process?.isRunning == true { return }
-        guard let python = pythonExecutable() else { throw LiquidctlError.dependencyMissing }
-        guard let helper = helperScript() else { throw LiquidctlError.helperMissing }
+        if process != nil { try stop() }
+        try awaitRetirement(timeout: 2)
+        guard let python = executableOverride ?? pythonExecutable() else { throw LiquidctlError.dependencyMissing }
+        guard let helper = helperOverride ?? helperScript() else { throw LiquidctlError.helperMissing }
 
         let process = Process()
         let stdinPipe = Pipe()
@@ -167,6 +270,9 @@ actor LiquidctlService {
         }
         do {
             try process.run()
+            stdinPipe.fileHandleForReading.closeFile()
+            stdoutPipe.fileHandleForWriting.closeFile()
+            stderrPipe.fileHandleForWriting.closeFile()
         } catch {
             throw LiquidctlError.launchFailed(error.localizedDescription)
         }
@@ -202,13 +308,19 @@ actor LiquidctlService {
         return candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) })
     }
 
-    private func readLine(from descriptor: Int32, timeout: Int32) throws -> Data {
+    private func readLine(from descriptor: Int32, timeout: TimeInterval) throws -> Data {
         var bytes: [UInt8] = []
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
         while true {
             var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-            let result = Darwin.poll(&pollDescriptor, 1, timeout * 1_000)
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { throw LiquidctlError.timedOut }
+            let result = Darwin.poll(&pollDescriptor, 1, Int32(max(1, remaining * 1_000)))
             if result == 0 { throw LiquidctlError.timedOut }
-            if result < 0 { throw LiquidctlError.disconnected }
+            if result < 0 {
+                if errno == EINTR { continue }
+                throw LiquidctlError.disconnected
+            }
             var byte: UInt8 = 0
             let count = Darwin.read(descriptor, &byte, 1)
             guard count == 1 else { throw LiquidctlError.disconnected }

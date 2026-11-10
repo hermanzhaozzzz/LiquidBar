@@ -11,7 +11,7 @@ struct PopoverView: View {
         VStack(spacing: 14) {
             header
             temperatureChart
-            presets
+            if model.snapshot.hasCoolingControl { presets }
             Divider()
             controls
             if let error = model.lastError {
@@ -36,19 +36,25 @@ struct PopoverView: View {
                 symbol: "cpu",
                 severity: severityForCPU
             )
-            SensorCard(
-                title: L10n.text("liquid"),
-                value: temperature(model.snapshot.liquidTemperature),
-                symbol: "drop.fill",
-                severity: severityForLiquid
-            )
-            SensorCard(
-                title: L10n.text("pump"),
-                value: model.snapshot.pumpRPM.map { "\($0)" } ?? "--",
-                symbol: "gauge.with.dots.needle.50percent",
-                severity: .normal,
-                suffix: "RPM"
-            )
+            if model.snapshot.hasPump {
+                SensorCard(
+                    title: L10n.text("liquid"), value: temperature(model.snapshot.liquidTemperature),
+                    symbol: "drop.fill", severity: severityForLiquid
+                )
+                SensorCard(
+                    title: L10n.text("pump"), value: model.snapshot.pumpRPM.map(String.init) ?? "--",
+                    symbol: "gauge.with.dots.needle.50percent", severity: .normal, suffix: "RPM"
+                )
+            } else {
+                SensorCard(
+                    title: L10n.text("cpuPower"), value: model.cpuPower.map { String(format: "%.0f", $0) } ?? "--",
+                    symbol: "bolt.fill", severity: .normal, suffix: "W"
+                )
+                SensorCard(
+                    title: L10n.text("cpuLoad"), value: model.cpuUtilization.map { String(format: "%.0f", $0) } ?? "--",
+                    symbol: "chart.bar.fill", severity: .normal, suffix: "%"
+                )
+            }
         }
     }
 
@@ -67,8 +73,15 @@ struct PopoverView: View {
                 .frame(width: 205)
             }
 
-            TemperatureHistoryChart(samples: model.chartSamples)
+            TemperatureHistoryChart(samples: model.chartSamples, showsLiquid: model.snapshot.hasLiquidSensor,
+                                    showsGPU: model.gpuReading != nil)
             .frame(height: 105)
+            HStack(spacing: 12) {
+                Text("CPU").foregroundStyle(.cyan)
+                if model.snapshot.hasLiquidSensor { Text(L10n.text("liquid")).foregroundStyle(.blue) }
+                if model.gpuReading != nil { Text("GPU").foregroundStyle(.orange) }
+            }
+            .font(.caption2)
         }
     }
 
@@ -77,38 +90,128 @@ struct PopoverView: View {
             ForEach(PresetID.allCases) { id in
                 Button(L10n.preset(id)) { model.applyPreset(id) }
                     .buttonStyle(PresetButtonStyle(selected: model.settingsStore.value.lastPreset == id))
-                    .disabled(model.busy)
+                    .disabled(model.busy || (!model.snapshot.hasSmart && !model.snapshot.hasPump))
             }
         }
     }
 
     private var controls: some View {
         VStack(spacing: 11) {
-            Toggle(L10n.text("linkedFans"), isOn: linkedFansBinding)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+            if model.snapshot.hasSmart {
+                Toggle(L10n.text("linkedFans"), isOn: linkedFansBinding)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
 
-            ForEach(0..<3, id: \.self) { index in
+                ForEach(0..<3, id: \.self) { index in
+                    SpeedSlider(
+                        name: model.settingsStore.value.fanNames[index],
+                        symbol: "fan.fill",
+                        target: fanBinding(index),
+                        minimum: 30,
+                        rpm: model.snapshot.fanRPM[index],
+                        actualDuty: model.snapshot.fanDuty[index],
+                        noTach: model.snapshot.fanModes[index] == nil && model.snapshot.fanRPM[index] == 0,
+                        enabled: model.snapshot.hasSmart && !model.busy,
+                        onCommit: { model.applyFan(index: index) }
+                    )
+                }
+            }
+            if model.snapshot.hasPump {
                 SpeedSlider(
-                    name: model.settingsStore.value.fanNames[index],
-                    symbol: "fan.fill",
-                    target: fanBinding(index),
-                    minimum: 30,
-                    rpm: model.snapshot.fanRPM[index],
-                    enabled: model.snapshot.connected && !model.busy,
-                    onCommit: { model.applyFan(index: index) }
+                    name: "Kraken " + L10n.text("pump"), symbol: "drop.circle.fill",
+                    target: $model.pumpTarget, minimum: 50, rpm: model.snapshot.pumpRPM,
+                    actualDuty: model.snapshot.pumpDuty,
+                    enabled: !model.busy, onCommit: model.applyPump
                 )
             }
+            if model.showRadiatorControl {
+                radiatorControl
+            }
+            if let gpu = model.gpuReading {
+                gpuMonitoring(gpu)
+            }
+            if model.settingsStore.value.fanCurve?.enabled == true {
+                Label(L10n.text("curveActive"), systemImage: "chart.xyaxis.line")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if !model.snapshot.hasCoolingControl {
+                Text(L10n.text("smartDisconnected")).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func gpuMonitoring(_ gpu: GPUReading) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Divider()
+            HStack {
+                HStack(spacing: 4) {
+                    Image(nsImage: MenuBarTemperatureRenderer.graphicsCardImage(tint: .secondaryLabelColor))
+                    Text(L10n.text("gpuFan"))
+                }
+                Spacer()
+                Text(temperature(gpu.temperature) + " °C")
+                    .foregroundStyle(.orange)
+                Text((gpu.fanRPM.map(String.init) ?? "--") + " RPM")
+                    .foregroundStyle(.secondary)
+            }
+            .font(.subheadline)
+            .monospacedDigit()
+            HStack {
+                Text(gpu.name).lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Text(gpu.fanPercent.map { String(format: "%.0f%%", $0) } ?? "--%")
+                    .monospacedDigit()
+                    .help(L10n.text("gpuPercentHelp"))
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            Text(L10n.text("gpuMonitorOnly"))
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var radiatorControl: some View {
+        VStack(spacing: 5) {
+            Divider()
             SpeedSlider(
-                name: L10n.text("pump"),
-                symbol: "drop.circle.fill",
-                target: $model.pumpTarget,
-                minimum: 50,
-                rpm: model.snapshot.pumpRPM,
-                enabled: model.snapshot.connected && !model.busy,
-                onCommit: model.applyPump
+                name: L10n.text("radiatorFan"), symbol: "fan.fill",
+                target: $model.motherboardCPUTarget, minimum: 30,
+                rpm: model.radiatorFan?.rpm, actualDuty: model.radiatorFan?.duty,
+                enabled: model.canControlRadiator,
+                onCommit: { Task { await model.applyMotherboard(.cpu) } }
             )
+            HStack {
+                if model.motherboardBusy {
+                    ProgressView().controlSize(.small)
+                    Text(L10n.text(model.usesTemporaryMotherboardControl ? "motherboardWorking" : "fanServiceWorking"))
+                } else if let reading = model.radiatorFan {
+                    Text(reading.automatic ? L10n.text("motherboardAutomatic") : L10n.text("manual"))
+                }
+                Spacer()
+                if model.radiatorMappingConfirmed {
+                    if model.radiatorFan == nil {
+                        Button(L10n.text("refresh"), action: model.initializeMotherboard)
+                            .disabled(model.motherboardBusy)
+                    } else {
+                        Button(L10n.text("restoreRadiatorAuto")) { Task { await model.restoreRadiatorAutomatic() } }
+                            .disabled(!model.canControlRadiator || model.radiatorFan?.automatic == true)
+                    }
+                } else {
+                    Button(L10n.text(model.usesTemporaryMotherboardControl ? "confirmRadiatorInSettings" : "installFanService"), action: openSettings)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if let reason = model.radiatorControlReason {
+                Text(reason).font(.caption2).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let error = model.motherboardError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
@@ -175,9 +278,14 @@ struct PopoverView: View {
 
 private struct TemperatureHistoryChart: View {
     let samples: [HistorySample]
+    let showsLiquid: Bool
+    let showsGPU: Bool
 
     private var limits: ClosedRange<Double> {
-        let values = samples.flatMap { [$0.cpuTemperature, $0.liquidTemperature].compactMap { $0 } }
+        let values = samples.flatMap {
+            [$0.cpuTemperature, showsLiquid ? $0.liquidTemperature : nil,
+             showsGPU ? $0.gpuTemperature : nil].compactMap { $0 }
+        }
         guard let minimum = values.min(), let maximum = values.max() else { return 20...80 }
         let padding = max(3, (maximum - minimum) * 0.12)
         let lower = floor((minimum - padding) / 5) * 5
@@ -196,7 +304,8 @@ private struct TemperatureHistoryChart: View {
                     context.stroke(grid, with: .color(.secondary.opacity(0.16)), lineWidth: 0.5)
                 }
                 draw(\.cpuTemperature, color: .cyan, context: &context, size: size)
-                draw(\.liquidTemperature, color: .blue, context: &context, size: size)
+                if showsLiquid { draw(\.liquidTemperature, color: .blue, context: &context, size: size) }
+                if showsGPU { draw(\.gpuTemperature, color: .orange, context: &context, size: size) }
             }
             if samples.isEmpty {
                 Text("--")
@@ -289,6 +398,8 @@ private struct SpeedSlider: View {
     @Binding var target: Double
     let minimum: Double
     let rpm: Int?
+    var actualDuty: Int? = nil
+    var noTach = false
     let enabled: Bool
     let onCommit: () -> Void
 
@@ -298,12 +409,17 @@ private struct SpeedSlider: View {
                 Label(name, systemImage: symbol)
                     .font(.subheadline)
                 Spacer()
-                Text(rpm.map { "\($0) RPM" } ?? "-- RPM")
+                Text(noTach ? L10n.text("noTach") : (rpm.map { "\($0) RPM" } ?? "-- RPM"))
                     .foregroundStyle(.secondary)
                     .font(.caption.monospacedDigit())
-                Text("\(Int(target.rounded()))%")
-                    .frame(width: 40, alignment: .trailing)
+                Text("\(L10n.text("target")) \(Int(target.rounded()))%")
+                    .frame(width: 78, alignment: .trailing)
                     .font(.caption.monospacedDigit())
+            }
+            if let actualDuty {
+                Text("\(L10n.text("readback")) \(actualDuty)%")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
             Slider(value: $target, in: minimum...100, step: 1, onEditingChanged: { editing in
                 if !editing { onCommit() }
@@ -340,51 +456,83 @@ struct SettingsView: View {
                 GroupBox(L10n.text("status")) {
                     VStack(alignment: .leading, spacing: 10) {
                         Toggle(L10n.text("launchAtLogin"), isOn: launchBinding)
-                        Toggle(
-                            L10n.text("showLiquidTemperatureInMenuBar"),
-                            isOn: showLiquidTemperatureInMenuBarBinding
-                        )
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(L10n.text("menuBarTemperature"))
+                            Picker(L10n.text("menuBarTemperature"), selection: menuBarTemperatureDisplayBinding) {
+                                Text("CPU").tag(MenuBarTemperatureDisplay.cpu)
+                                Text("GPU").tag(MenuBarTemperatureDisplay.gpu)
+                                Text("CPU + GPU").tag(MenuBarTemperatureDisplay.cpuAndGPU)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .help(L10n.text("menuBarAlertHelp"))
+                        }
+                        if model.snapshot.hasLiquidSensor {
+                            Toggle(
+                                L10n.text("showLiquidTemperatureInMenuBar"),
+                                isOn: showLiquidTemperatureInMenuBarBinding
+                            )
+                        }
                         if model.loginItemStatus == .requiresApproval {
                             Text(L10n.text("loginNeedsApproval"))
                                 .font(.caption).foregroundStyle(.orange)
                             Button(L10n.text("openLoginItems"), action: model.openLoginItemsSettings)
                         }
-                        Text(model.menuBarText)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(6)
-                }
-
-                GroupBox(L10n.text("fanNames")) {
-                    VStack(spacing: 10) {
-                        ForEach(0..<3, id: \.self) { index in
-                            HStack {
-                                TextField("Fan \(index + 1)", text: fanNameBinding(index))
-                                Button(L10n.text("identify")) { model.identifyFan(index) }
-                                    .disabled(model.busy || !model.snapshot.connected)
+                        HStack(spacing: 12) {
+                            ForEach(model.menuBarItems) { item in
+                                HStack(spacing: 4) {
+                                    if let image = MenuBarTemperatureRenderer.image(for: item) {
+                                        Image(nsImage: image)
+                                    }
+                                    Text(item.formattedTemperature).monospacedDigit()
+                                }
+                                .foregroundStyle(Color(nsColor: MenuBarTemperatureRenderer.color(for: item.level)))
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityLabel(item.accessibilityText)
                             }
                         }
+                        .font(.system(size: 12, weight: .medium))
                     }
                     .padding(6)
                 }
 
-                GroupBox(L10n.text("presets")) {
-                    VStack(spacing: 10) {
-                        ForEach(PresetID.allCases) { id in
-                            PresetEditor(id: id, preset: presetBinding(id))
+                DeviceControlsSettingsView(model: model, store: store)
+
+                if model.snapshot.hasSmart {
+                    GroupBox(L10n.text("fanNames")) {
+                        VStack(spacing: 10) {
+                            ForEach(0..<3, id: \.self) { index in
+                                HStack {
+                                    TextField("Fan \(index + 1)", text: fanNameBinding(index))
+                                    Button(L10n.text("identify")) { model.identifyFan(index) }
+                                        .disabled(model.busy || !model.snapshot.hasSmart)
+                                }
+                            }
                         }
+                        .padding(6)
                     }
-                    .padding(6)
-                }
 
+                }
+                if model.snapshot.hasCoolingControl {
+                    GroupBox(L10n.text("presets")) {
+                        VStack(spacing: 10) {
+                            ForEach(PresetID.allCases) { id in
+                                PresetEditor(id: id, preset: presetBinding(id), showFan: model.snapshot.hasSmart, showPump: model.snapshot.hasPump)
+                            }
+                        }
+                        .padding(6)
+                    }
+
+                }
                 GroupBox(L10n.text("alerts")) {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(L10n.text("systemNotifications"), isOn: notificationBinding)
                         Toggle(L10n.text("criticalSound"), isOn: setting(\.criticalSoundEnabled))
                             .disabled(!store.value.notificationsEnabled)
-                        Toggle(L10n.text("automaticBoost"), isOn: setting(\.automaticEmergencyBoost))
-                        ThresholdEditor(settings: $store.value.thresholds)
+                        if model.snapshot.hasCoolingControl {
+                            Toggle(L10n.text("automaticBoost"), isOn: setting(\.automaticEmergencyBoost))
+                        }
+                        ThresholdEditor(settings: $store.value.thresholds, showLiquid: model.snapshot.hasLiquidSensor)
                         if notifications.authorizationStatus == .denied {
                             Text(L10n.text("notificationDenied"))
                                 .font(.caption).foregroundStyle(.orange)
@@ -431,6 +579,13 @@ struct SettingsView: View {
         )
     }
 
+    private var menuBarTemperatureDisplayBinding: Binding<MenuBarTemperatureDisplay> {
+        Binding(
+            get: { store.value.menuBarTemperatureDisplay ?? .cpu },
+            set: { store.value.menuBarTemperatureDisplay = $0 }
+        )
+    }
+
     private func fanNameBinding(_ index: Int) -> Binding<String> {
         Binding(
             get: { store.value.fanNames[index] },
@@ -456,15 +611,21 @@ struct SettingsView: View {
 private struct PresetEditor: View {
     let id: PresetID
     @Binding var preset: CoolingPreset
+    let showFan: Bool
+    let showPump: Bool
 
     var body: some View {
         HStack {
             Text(L10n.preset(id)).frame(width: 75, alignment: .leading)
             Spacer()
-            Stepper("Fan \(preset.fanDuty)%", value: $preset.fanDuty, in: 30...100)
-                .frame(width: 130)
-            Stepper("Pump \(preset.pumpDuty)%", value: $preset.pumpDuty, in: 50...100)
-                .frame(width: 150)
+            if showFan {
+                Stepper("Fan \(preset.fanDuty)%", value: $preset.fanDuty, in: 30...100)
+                    .frame(width: 130)
+            }
+            if showPump {
+                Stepper("Kraken Pump \(preset.pumpDuty)%", value: $preset.pumpDuty, in: 50...100)
+                    .frame(width: 170)
+            }
         }
         .font(.caption)
     }
@@ -472,6 +633,7 @@ private struct PresetEditor: View {
 
 private struct ThresholdEditor: View {
     @Binding var settings: AlertThresholds
+    let showLiquid: Bool
 
     var body: some View {
         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
@@ -483,13 +645,15 @@ private struct ThresholdEditor: View {
                 Text(L10n.text("cpuCritical"))
                 Stepper("\(Int(settings.cpuCritical))°C", value: $settings.cpuCritical, in: 60...95)
             }
-            GridRow {
-                Text(L10n.text("liquidWarning"))
-                Stepper("\(Int(settings.liquidWarning))°C", value: $settings.liquidWarning, in: 30...59)
-            }
-            GridRow {
-                Text(L10n.text("liquidCritical"))
-                Stepper("\(Int(settings.liquidCritical))°C", value: $settings.liquidCritical, in: 35...60)
+            if showLiquid {
+                GridRow {
+                    Text(L10n.text("liquidWarning"))
+                    Stepper("\(Int(settings.liquidWarning))°C", value: $settings.liquidWarning, in: 30...59)
+                }
+                GridRow {
+                    Text(L10n.text("liquidCritical"))
+                    Stepper("\(Int(settings.liquidCritical))°C", value: $settings.liquidCritical, in: 35...60)
+                }
             }
         }
         .font(.caption)

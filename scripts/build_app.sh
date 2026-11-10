@@ -6,6 +6,8 @@ repo_root="${script_dir:h}"
 app_path="$repo_root/dist/LiquidBar.app"
 contents_path="$app_path/Contents"
 iconset_path="$repo_root/.build/LiquidBar.iconset"
+service_package="$repo_root/dist/FanControlService"
+service_product="LiquidBarFanControlDaemon"
 
 if [[ "$repo_root" != "/Users/"*"/LiquidBar" && ! -f "$repo_root/Package.swift" ]]; then
   print -u2 "Unexpected repository root: $repo_root"
@@ -15,8 +17,8 @@ fi
 cd "$repo_root"
 swift build -c release
 binary_dir="$(swift build -c release --show-bin-path)"
-if [[ -z "$binary_dir" || ! -x "$binary_dir/LiquidBar" ]]; then
-  print -u2 "Release binary was not produced"
+if [[ -z "$binary_dir" || ! -x "$binary_dir/LiquidBar" || ! -x "$binary_dir/$service_product" ]]; then
+  print -u2 "Release application and fan-service binaries were not produced"
   exit 1
 fi
 
@@ -45,5 +47,10 @@ for spec in \
 done
 /usr/bin/iconutil -c icns "$iconset_path" -o "$contents_path/Resources/AppIcon.icns"
 
-/usr/bin/codesign --force --deep --sign - "$app_path"
+/bin/mkdir -p "$service_package"
+/bin/cp "$binary_dir/$service_product" "$service_package/$service_product"
+/usr/bin/codesign --force --options runtime --timestamp=none --sign - "$service_package/$service_product"
+/usr/bin/codesign --force --deep --options runtime --timestamp=none --sign - "$app_path"
+/usr/bin/python3 "$repo_root/scripts/build_service_manifest.py" "$app_path" "$service_package"
 print "$app_path"
+print "$service_package"
