@@ -4,6 +4,39 @@ import Foundation
 import FanControlShared
 import ServiceManagement
 
+enum FanServiceHealth: Equatable {
+    case notInstalled
+    case installed
+    case needsUpdate
+    case needsRestart
+}
+
+struct PermissionAudit: Equatable {
+    var notificationsMissing: Bool
+    var loginItemMissing: Bool
+    var fanServiceNeedsUpdate: Bool
+    var fanServiceNeedsRestart: Bool
+
+    var needsAttention: Bool {
+        notificationsMissing || loginItemMissing || fanServiceNeedsUpdate || fanServiceNeedsRestart
+    }
+
+    var fingerprint: String {
+        let fan = fanServiceNeedsRestart ? 2 : (fanServiceNeedsUpdate ? 1 : 0)
+        return [
+            "notifications=\(notificationsMissing ? 1 : 0)",
+            "login=\(loginItemMissing ? 1 : 0)",
+            "fan=\(fan)@\(AppVersion.current)#\(AppVersion.build)",
+        ].joined(separator: ";")
+    }
+
+    // Only the fan-service component needs its own pane; other shortfalls start at permissions.
+    var onboardingStep: Int {
+        (fanServiceNeedsUpdate || fanServiceNeedsRestart)
+            && !notificationsMissing && !loginItemMissing ? 1 : 2
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var snapshot = DeviceSnapshot.unavailable
@@ -17,6 +50,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var motherboardError: String?
     @Published private(set) var motherboardTestResult: String?
     @Published private(set) var fanServiceStatus: FanControlStatus?
+    @Published private(set) var fanServiceHealth: FanServiceHealth =
+        FanServiceInspector.inspect()
     @Published var motherboardCPUTarget = 50.0
     @Published var motherboardPumpTarget = 100.0
     @Published private(set) var severity: AlertSeverity = .normal
@@ -24,6 +59,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var loginItemStatus: SMAppService.Status = .notRegistered
     @Published var fanTargets = [50.0, 50.0, 50.0]
     @Published var pumpTarget = 70.0
+    @Published var pumpAutomatic = false
+    @Published private(set) var radiatorAutomaticOverride: Bool?
     @Published var selectedRange: ChartRange = .fifteenMinutes
     @Published var popoverOpen = false
     @Published var busy = false
@@ -63,7 +100,7 @@ final class AppModel: ObservableObject {
     private var candidateSeverity: AlertSeverity = .normal
     private var candidateStartedAt = Date()
     private var recoveryStartedAt: Date?
-    private var emergencyRestore: (fans: [Int], pump: Int)?
+    private var emergencyRestore: (fans: [Int], pump: Int, pumpAutomatic: Bool)?
     private var lastHistoryAt = Date.distantPast
     private var started = false
 
@@ -78,6 +115,7 @@ final class AppModel: ObservableObject {
         self.settingsStore = resolvedSettingsStore
         self.historyStore = resolvedHistoryStore
         let settings = resolvedSettingsStore.value
+        pumpAutomatic = settings.pumpAutomatic == true
         if let presetID = settings.lastPreset, let preset = settings.presets[presetID] {
             fanTargets = Array(repeating: Double(preset.fanDuty), count: 3)
             pumpTarget = Double(preset.pumpDuty)
@@ -166,7 +204,89 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func stop() async -> Bool {
+    // Runs once per launch: ask only for missing permissions, and re-register a lost
+    // login item only when the user still wants it. Never nags for an unchanged shortfall.
+    func auditPermissions() async -> PermissionAudit {
+        await notifications.refreshAuthorization()
+        refreshLoginItemStatus()
+
+        if notifications.authorizationStatus == .notDetermined {
+            let granted = await notifications.requestAuthorization()
+            settingsStore.value.notificationsEnabled = granted
+        }
+
+        if settingsStore.value.launchAtLogin,
+           loginItemStatus == .notRegistered || loginItemStatus == .notFound {
+            configureLaunchAtLogin(enabled: true)
+        }
+
+        if persistentFanServiceInstalled && !usesTemporaryMotherboardControl {
+            await prepareRadiatorControl()
+        }
+
+        let notificationsMissing = settingsStore.value.notificationsEnabled
+            && notifications.authorizationStatus != .authorized
+        let loginItemMissing = settingsStore.value.launchAtLogin
+            && loginItemStatus != .enabled
+        let inspected = FanServiceInspector.inspect()
+        return PermissionAudit(
+            notificationsMissing: notificationsMissing,
+            loginItemMissing: loginItemMissing,
+            fanServiceNeedsUpdate: inspected == .needsUpdate,
+            fanServiceNeedsRestart: inspected == .needsRestart
+        )
+    }
+
+    // Used by the --ui-preview development flag so layout work never touches hardware.
+    func loadPreviewState() {
+        cpuTemperature = 58.4
+        cpuPower = 92
+        cpuUtilization = 37
+        snapshot = DeviceSnapshot(
+            timestamp: Date(),
+            liquidTemperature: 36.2,
+            pumpRPM: 2140,
+            pumpDuty: 70,
+            fanRPM: [980, 1020, nil],
+            fanDuty: [50, 50, nil],
+            fanModes: ["manual", "manual", nil],
+            noiseLevel: nil,
+            connected: true,
+            devices: [
+                "smart": DeviceCapability(
+                    connected: true,
+                    capabilities: ["fan_control", "lighting"],
+                    channels: ["led1", "led2", "sync"]
+                ),
+                "aura": DeviceCapability(
+                    connected: true,
+                    capabilities: ["lighting"],
+                    channels: ["sync", "led1", "led2", "led3", "led4"]
+                ),
+                "kraken": DeviceCapability(
+                    connected: true,
+                    capabilities: ["pump_control", "liquid_temperature"],
+                    channels: []
+                ),
+            ],
+            errors: [:]
+        )
+        gpuSnapshot = GPUSnapshot(sampledAt: Date(), devices: [
+            GPUReading(id: 1, name: "Radeon RX 5700 XT", temperature: 54,
+                       fanRPM: 1100, fanPercent: 32, powerWatts: 140),
+        ])
+        fanTargets = [50, 50, 50]
+        pumpAutomatic = true
+        fanServiceStatus = FanControlStatus(
+            cpuIndex: 1, chipID: 54315, driverVersion: "0.7.2",
+            rpm: 1448, duty: 53, automatic: true, temperature: 61.9,
+            controlledByThisConnection: false, lastReason: "startup"
+        )
+        cpuReadAt = Date()
+        powerReadAt = Date()
+    }
+
+    func stop(ignoringFanService: Bool = false) async -> Bool {
         suspended = true
         cpuTask?.cancel()
         gpuTask?.cancel()
@@ -175,8 +295,10 @@ final class AppModel: ObservableObject {
         motherboardTask?.cancel()
         deviceTask?.cancel()
         var shutdownErrors: [String] = []
-        do { try await privilegedFans.shutdown() }
-        catch { shutdownErrors.append("CPU fan service restore: \(error.localizedDescription)") }
+        if !ignoringFanService {
+            do { try await privilegedFans.shutdown() }
+            catch { shutdownErrors.append("CPU fan service restore: \(error.localizedDescription)") }
+        }
         do { try await motherboard.restoreAllOverrides() }
         catch { shutdownErrors.append("Motherboard restore: \(error.localizedDescription)") }
         do { try await motherboard.shutdown() }
@@ -249,6 +371,8 @@ final class AppModel: ObservableObject {
 
     func applyFan(index: Int) {
         guard fanTargets.indices.contains(index), snapshot.hasSmart, !busy else { return }
+        let wasCurve = settingsStore.value.fanCurve?.enabled == true
+        let curveDuties = fanTargets.map { min(100, max(30, Int($0.rounded()))) }
         disableCurve()
         if settingsStore.value.linkedFans {
             fanTargets = Array(repeating: fanTargets[index], count: 3)
@@ -259,32 +383,69 @@ final class AppModel: ObservableObject {
         fanTargets[index] = Double(min(100, max(30, duty)))
         settingsStore.value.lastPreset = nil
         settingsStore.value.manualFanDuty = fanTargets.map { Int($0.rounded()) }
-        Task { await performWrite { try await self.liquidctl.setFan(index: index + 1, duty: duty) } }
+        Task {
+            // Freeze the current curve output as manual targets instead of the
+            // helper's full-speed override, then move only the dragged channel.
+            if wasCurve {
+                await performWrite {
+                    try await self.liquidctl.apply(fans: curveDuties, pump: nil, curve: false)
+                }
+            }
+            await performWrite { try await self.liquidctl.setFan(index: index + 1, duty: duty) }
+        }
     }
 
     func applyPump() {
         guard snapshot.hasPump, !busy else { return }
         let duty = min(100, max(50, Int(pumpTarget.rounded())))
         pumpTarget = Double(duty)
+        pumpAutomatic = false
+        settingsStore.value.pumpAutomatic = false
         settingsStore.value.lastPreset = nil
         settingsStore.value.manualPumpDuty = duty
         Task { await performWrite { try await self.liquidctl.setPump(duty: duty) } }
+    }
+
+    func setPumpAutomatic(_ enabled: Bool) {
+        guard snapshot.hasPump, !busy else { return }
+        pumpAutomatic = enabled
+        settingsStore.value.pumpAutomatic = enabled
+        guard enabled else {
+            if let duty = snapshot.pumpDuty, (50...100).contains(duty) {
+                pumpTarget = Double(duty)
+            }
+            applyPump()
+            return
+        }
+        Task {
+            let ok = await performWrite { try await self.liquidctl.setPumpAutomatic() }
+            if !ok {
+                pumpAutomatic = false
+                settingsStore.value.pumpAutomatic = false
+            }
+        }
     }
 
     func applyPreset(_ id: PresetID) {
         guard let preset = settingsStore.value.presets[id], !busy else { return }
         disableCurve()
         fanTargets = Array(repeating: Double(preset.fanDuty), count: 3)
-        pumpTarget = Double(preset.pumpDuty)
+        if let radiator = preset.radiatorDuty {
+            motherboardCPUTarget = Double(min(100, max(30, radiator)))
+        }
         settingsStore.value.lastPreset = id
         settingsStore.value.manualFanDuty = Array(repeating: preset.fanDuty, count: 3)
-        settingsStore.value.manualPumpDuty = preset.pumpDuty
         Task {
-            await performWrite {
-                try await self.liquidctl.apply(
-                    fans: self.snapshot.hasSmart ? Array(repeating: preset.fanDuty, count: 3) : nil,
-                    pump: self.snapshot.hasPump ? preset.pumpDuty : nil
-                )
+            if self.snapshot.hasSmart {
+                await performWrite {
+                    try await self.liquidctl.apply(
+                        fans: Array(repeating: preset.fanDuty, count: 3),
+                        pump: nil
+                    )
+                }
+            }
+            if self.radiatorMappingConfirmed {
+                await self.applyMotherboard(.cpu)
             }
         }
     }
@@ -360,7 +521,8 @@ final class AppModel: ObservableObject {
         gpuTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refreshGPU()
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                let interval = self?.settingsStore.value.samplingProfile?.telemetryInterval ?? 2
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
         }
         startDeviceLoops()
@@ -378,7 +540,8 @@ final class AppModel: ObservableObject {
         cpuTask = Task { [weak self] in
             while !Task.isCancelled {
                 if self?.suspended == false || allowWhileSuspended { self?.refreshCPU() }
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                let interval = self?.settingsStore.value.samplingProfile?.telemetryInterval ?? 2
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
         }
     }
@@ -399,7 +562,8 @@ final class AppModel: ObservableObject {
                         self.powerReadAt = nil
                     }
                 }
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                let interval = self.settingsStore.value.samplingProfile?.telemetryInterval ?? 2
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
         }
         motherboardTask = Task { [weak self] in
@@ -412,7 +576,8 @@ final class AppModel: ObservableObject {
                         await self.refreshMotherboard()
                     }
                 }
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                let interval = self.settingsStore.value.samplingProfile?.telemetryInterval ?? 2
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
         }
         deviceTask = Task { [weak self] in
@@ -422,8 +587,9 @@ final class AppModel: ObservableObject {
                     await self.refreshDevice()
                     await self.updateAutomaticControls()
                 }
-                let seconds: UInt64 = self.popoverOpen ? 2 : 5
-                try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                let profile = self.settingsStore.value.samplingProfile ?? .balanced
+                let seconds = profile.deviceInterval(popoverOpen: self.popoverOpen)
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             }
         }
     }
@@ -447,6 +613,9 @@ final class AppModel: ObservableObject {
         do {
             let newSnapshot = try await liquidctl.status()
             snapshot = newSnapshot
+            if pumpAutomatic, let duty = newSnapshot.pumpDuty {
+                pumpTarget = Double(duty)
+            }
             updateErrorSummary()
             failureStartedAt = nil
             didNotifyDeviceFailure = false
@@ -474,13 +643,11 @@ final class AppModel: ObservableObject {
 
     private func applyManualState() {
         let fans = fanTargets.map { min(100, max(30, Int($0.rounded()))) }
-        let pump = min(100, max(50, Int(pumpTarget.rounded())))
         settingsStore.value.lastPreset = nil
         settingsStore.value.manualFanDuty = fans
-        settingsStore.value.manualPumpDuty = pump
         Task { await performWrite { try await self.liquidctl.apply(
             fans: self.snapshot.hasSmart ? fans : nil,
-            pump: self.snapshot.hasPump ? pump : nil
+            pump: nil
         ) } }
     }
 
@@ -496,14 +663,22 @@ final class AppModel: ObservableObject {
             pump = settings.manualPumpDuty
         }
         guard snapshot.hasSmart || snapshot.hasPump else { return }
-        if settings.fanCurve?.enabled == true { return }
-        await performWrite { try await self.liquidctl.apply(
-            fans: self.snapshot.hasSmart ? fans : nil,
-            pump: self.snapshot.hasPump ? pump : nil
-        ) }
+        if settings.fanCurve?.enabled != true, snapshot.hasSmart {
+            await performWrite { try await self.liquidctl.apply(fans: fans, pump: nil) }
+        }
+        if snapshot.hasPump {
+            if settings.pumpAutomatic == true {
+                let ok = await performWrite { try await self.liquidctl.setPumpAutomatic() }
+                pumpAutomatic = ok
+                if !ok { settingsStore.value.pumpAutomatic = false }
+            } else {
+                await performWrite { try await self.liquidctl.apply(fans: nil, pump: pump) }
+            }
+        }
     }
 
-    private func performWrite(_ operation: @escaping () async throws -> Void) async {
+    @discardableResult
+    private func performWrite(_ operation: @escaping () async throws -> Void) async -> Bool {
         busy = true
         defer { busy = false }
         do {
@@ -511,11 +686,13 @@ final class AppModel: ObservableObject {
             commandError = nil
             AppLogger.shared.log("device setting applied")
             await refreshDevice()
+            return true
         } catch {
             commandError = error.localizedDescription
             lastError = commandError
             AppLogger.shared.log("device write failed: \(error.localizedDescription)")
             await refreshDevice()
+            return false
         }
     }
 
@@ -579,7 +756,8 @@ final class AppModel: ObservableObject {
            emergencyRestore == nil {
             emergencyRestore = (
                 fans: fanTargets.map { Int($0.rounded()) },
-                pump: Int(pumpTarget.rounded())
+                pump: Int(pumpTarget.rounded()),
+                pumpAutomatic: pumpAutomatic
             )
             Task { await performWrite { try await self.liquidctl.apply(
                 fans: self.snapshot.hasSmart ? [100, 100, 100] : nil,
@@ -589,10 +767,31 @@ final class AppModel: ObservableObject {
             emergencyRestore = nil
             fanTargets = restore.fans.map(Double.init)
             pumpTarget = Double(restore.pump)
-            Task { await performWrite { try await self.liquidctl.apply(
-                fans: self.snapshot.hasSmart ? restore.fans : nil,
-                pump: self.snapshot.hasPump ? restore.pump : nil
-            ) } }
+            Task {
+                if self.snapshot.hasSmart {
+                    await self.performWrite {
+                        try await self.liquidctl.apply(fans: restore.fans, pump: nil)
+                    }
+                }
+                if self.snapshot.hasPump {
+                    if restore.pumpAutomatic {
+                        let ok = await self.performWrite {
+                            try await self.liquidctl.setPumpAutomatic()
+                        }
+                        self.pumpAutomatic = ok
+                        if !ok {
+                            self.settingsStore.value.pumpAutomatic = false
+                            await self.performWrite {
+                                try await self.liquidctl.apply(fans: nil, pump: restore.pump)
+                            }
+                        }
+                    } else {
+                        await self.performWrite {
+                            try await self.liquidctl.apply(fans: nil, pump: restore.pump)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -600,13 +799,35 @@ final class AppModel: ObservableObject {
         var curve = settingsStore.value.fanCurve ?? FanCurveSettings()
         curve.enabled = enabled
         settingsStore.value.fanCurve = curve
+        objectWillChange.send()
         lastCurveDuty = nil
         if enabled { settingsStore.value.lastPreset = nil }
         Task {
             if enabled {
                 await updateAutomaticControls()
             } else {
-                await performWrite { try await self.liquidctl.disarmCurve() }
+                // Freeze the current curve output as manual targets. Only fall back
+                // to the full-speed failsafe if that write cannot be confirmed.
+                let duties = (0..<3).map { index in
+                    let value = self.snapshot.fanDuty[index]
+                        ?? Int(self.fanTargets[index].rounded())
+                    return min(100, max(30, value))
+                }
+                let ok = await performWrite {
+                    try await self.liquidctl.apply(fans: duties, pump: nil, curve: false)
+                }
+                if ok {
+                    fanTargets = duties.map(Double.init)
+                    settingsStore.value.manualFanDuty = duties
+                } else {
+                    let safe = await performWrite {
+                        try await self.liquidctl.disarmCurve()
+                    }
+                    if safe {
+                        fanTargets = [100, 100, 100]
+                        settingsStore.value.manualFanDuty = [100, 100, 100]
+                    }
+                }
             }
         }
     }
@@ -638,6 +859,22 @@ final class AppModel: ObservableObject {
             }
         }
         if settingsStore.value.display?.enabled == true { await sendDisplay() }
+    }
+
+    func applyLightingToAll(_ values: [String: LightingSettings]) {
+        guard !busy else { return }
+        let targets = values.filter { snapshot.supports($0.key, "lighting") }
+        guard !targets.isEmpty else { return }
+        Task {
+            await performWrite {
+                for (role, settings) in targets {
+                    try await self.liquidctl.setLighting(device: role, settings: settings)
+                }
+                var lighting = self.settingsStore.value.lighting ?? [:]
+                for (role, settings) in targets { lighting[role] = settings }
+                self.settingsStore.value.lighting = lighting
+            }
+        }
     }
 
     func applyLighting(_ device: String, settings: LightingSettings) {
@@ -696,6 +933,25 @@ final class AppModel: ObservableObject {
     }
 
     var persistentFanServiceInstalled: Bool { fanServiceInstalled() }
+
+    static func fanServiceHealth(for error: Error) -> FanServiceHealth {
+        _ = error
+        return FanServiceInspector.inspect(force: true)
+    }
+
+    func completeFanServiceInstall() {
+        FanServiceInspector.invalidate()
+        fanServiceStatus = nil
+        fanServiceHealth = .installed
+        motherboardError = nil
+    }
+
+    func restartApplication() {
+        Task { @MainActor in
+            _ = await stop()
+            InAppFanServiceInstaller.relaunchAndExit()
+        }
+    }
     var usesTemporaryMotherboardControl: Bool {
         settingsStore.value.temporaryMotherboardControl == true && !persistentFanServiceInstalled
     }
@@ -765,16 +1021,40 @@ final class AppModel: ObservableObject {
     func prepareRadiatorControl() async {
         if !usesTemporaryMotherboardControl {
             guard !motherboardBusy, !suspended else { return }
+            switch FanServiceInspector.inspect() {
+            case .notInstalled:
+                fanServiceStatus = nil
+                fanServiceHealth = .notInstalled
+                motherboardError = nil
+                return
+            case .needsUpdate:
+                fanServiceStatus = nil
+                fanServiceHealth = .needsUpdate
+                motherboardError = nil
+                return
+            case .needsRestart:
+                fanServiceStatus = nil
+                fanServiceHealth = .needsRestart
+                motherboardError = nil
+                return
+            case .installed:
+                break
+            }
             do {
                 try await retireTemporaryMotherboardSession()
                 let wasUnavailable = fanServiceStatus == nil
                 let status = try await privilegedFans.status()
                 fanServiceStatus = status
+                fanServiceHealth = .installed
                 motherboardError = status.error
-                if wasUnavailable { motherboardCPUTarget = Double(status.duty) }
+                if status.automatic || wasUnavailable {
+                    motherboardCPUTarget = Double(status.duty)
+                }
             } catch {
+                let inspected = FanServiceInspector.inspect(force: true)
                 fanServiceStatus = nil
-                motherboardError = error.localizedDescription
+                fanServiceHealth = inspected
+                motherboardError = inspected == .installed ? error.localizedDescription : nil
             }
             return
         }
@@ -809,7 +1089,15 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshMotherboard() async {
-        do { recordMotherboard(try await motherboard.readFans()) }
+        do {
+            let updated = try await motherboard.readFans()
+            recordMotherboard(updated)
+            if let index = settingsStore.value.motherboardMapping?.confirmedIndex(for: .cpu),
+               let reading = updated.fans.first(where: { $0.index == index }),
+               reading.automatic {
+                motherboardCPUTarget = Double(reading.duty)
+            }
+        }
         catch {
             motherboardSnapshot = nil
             motherboardReadAt = nil
@@ -837,15 +1125,20 @@ final class AppModel: ObservableObject {
             guard role == .cpu, !motherboardBusy, !suspended, motherboardCPUTarget.isFinite,
                   (30...100).contains(motherboardCPUTarget) else { return }
             motherboardBusy = true
+            radiatorAutomaticOverride = false
             defer { motherboardBusy = false }
             do {
                 try await retireTemporaryMotherboardSession()
                 let status = try await privilegedFans.setCPU(percent: Int(motherboardCPUTarget.rounded()))
                 fanServiceStatus = status
+                fanServiceHealth = .installed
                 motherboardError = status.error
+                radiatorAutomaticOverride = nil
             } catch {
                 fanServiceStatus = nil
                 motherboardError = error.localizedDescription
+                fanServiceHealth = Self.fanServiceHealth(for: error)
+                radiatorAutomaticOverride = nil
             }
             return
         }
@@ -856,6 +1149,7 @@ final class AppModel: ObservableObject {
               motherboardSnapshot?.fans.contains(where: { $0.index == index }) == true else { return }
         let percent = Int(target.rounded())
         motherboardBusy = true
+        if role == .cpu { radiatorAutomaticOverride = false }
         defer { motherboardBusy = false }
         do {
             let result = try await motherboard.setDuty(index: index, percent: percent, role: role)
@@ -863,10 +1157,13 @@ final class AppModel: ObservableObject {
             guard let reading = result.fans.first(where: { $0.index == index }),
                   !reading.automatic, abs(reading.duty - percent) <= 1 else {
                 motherboardError = L10n.text("motherboardWriteUnconfirmed")
+                if role == .cpu { radiatorAutomaticOverride = nil }
                 return
             }
             motherboardError = nil
+            if role == .cpu { radiatorAutomaticOverride = nil }
         } catch {
+            if role == .cpu { radiatorAutomaticOverride = nil }
             motherboardSnapshot = nil
             motherboardReadAt = nil
             motherboardInitialized = false
@@ -874,37 +1171,53 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func takeRadiatorManualControl() async {
+        if let duty = radiatorFan?.duty, (30...100).contains(duty) {
+            motherboardCPUTarget = Double(duty)
+        }
+        await applyMotherboard(.cpu)
+    }
+
     func restoreRadiatorAutomatic() async {
         if !usesTemporaryMotherboardControl {
             guard !motherboardBusy else { return }
             motherboardBusy = true
+            radiatorAutomaticOverride = true
             defer { motherboardBusy = false }
             do {
                 try await retireTemporaryMotherboardSession()
                 let status = try await privilegedFans.restoreCPU()
                 fanServiceStatus = status
+                fanServiceHealth = .installed
                 motherboardCPUTarget = Double(status.duty)
                 motherboardError = status.error
+                radiatorAutomaticOverride = nil
             } catch {
                 fanServiceStatus = nil
                 motherboardError = error.localizedDescription
+                fanServiceHealth = Self.fanServiceHealth(for: error)
+                radiatorAutomaticOverride = nil
             }
             return
         }
         guard let index = settingsStore.value.motherboardMapping?.confirmedIndex(for: .cpu),
               motherboardInitialized, !motherboardBusy else { return }
         motherboardBusy = true
+        radiatorAutomaticOverride = true
         defer { motherboardBusy = false }
         do {
             let result = try await motherboard.restoreAutomatic(index: index)
             recordMotherboard(result)
             guard let reading = result.fans.first(where: { $0.index == index }), reading.automatic else {
                 motherboardError = L10n.text("motherboardRestoreUnconfirmed")
+                radiatorAutomaticOverride = nil
                 return
             }
             motherboardCPUTarget = Double(reading.duty)
             motherboardError = nil
+            radiatorAutomaticOverride = nil
         } catch {
+            radiatorAutomaticOverride = nil
             motherboardSnapshot = nil
             motherboardReadAt = nil
             motherboardInitialized = false
@@ -955,7 +1268,7 @@ final class AppModel: ObservableObject {
         refreshLoginItemStatus()
     }
 
-    private func refreshLoginItemStatus() {
+    func refreshLoginItemStatus() {
         loginItemStatus = SMAppService.mainApp.status
     }
 }

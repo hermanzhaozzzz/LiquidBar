@@ -7,25 +7,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let model = AppModel()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
+    private let settingsNavigation = SettingsNavigation()
     private var settingsWindow: NSWindow?
+    private var onboardingWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
+
+    private var isPreview: Bool { CommandLine.arguments.contains("--ui-preview") }
+
+    private var previewAppearance: NSAppearance? {
+        guard isPreview, CommandLine.arguments.contains("--dark") else { return nil }
+        return NSAppearance(named: .darkAqua)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
+        if CommandLine.arguments.contains("--dark") {
+            NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+        }
         configureStatusItem()
         configurePopover()
         observeModel()
         observeLifecycle()
         model.notifications.onNotificationActivated = { [weak self] in self?.showPopover() }
-        model.start()
-        if CommandLine.arguments.contains("--show-popover") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        if isPreview {
+            model.loadPreviewState()
+        } else {
+            model.start()
+        }
+        model.refreshNotificationAuthorization()
+
+        if CommandLine.arguments.contains("--show-onboarding") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.showOnboarding()
+            }
+        } else if CommandLine.arguments.contains("--show-settings") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.showSettings()
+            }
+        } else if CommandLine.arguments.contains("--show-popover") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.showPopover()
+            }
+        } else if !isPreview {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let audit = await self.model.auditPermissions()
+                self.handlePermissionAudit(audit)
             }
         }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isPreview {
+            return .terminateNow
+        }
         Task {
             let completed = await model.stop()
             sender.reply(toApplicationShouldTerminate: completed)
@@ -48,13 +83,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func configurePopover() {
-        popover.behavior = .transient
-        popover.animates = true
+        popover.behavior = isPreview ? .applicationDefined : .transient
+        popover.animates = !isPreview
+        popover.appearance = previewAppearance
         popover.delegate = self
         popover.contentViewController = NSHostingController(
             rootView: PopoverView(
                 model: model,
+                store: model.settingsStore,
                 openSettings: { [weak self] in self?.showSettings() },
+                openFanService: { [weak self] in self?.showSettings(pane: .motherboard) },
                 quit: { NSApplication.shared.terminate(nil) }
             )
         )
@@ -96,7 +134,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.model.refreshNotificationAuthorization() }
+            Task { @MainActor in
+                self?.model.refreshNotificationAuthorization()
+                self?.model.refreshLoginItemStatus()
+            }
         }
     }
 
@@ -120,23 +161,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func showPopover() {
         guard let button = statusItem.button else { return }
         model.setPopoverOpen(true)
-        model.refreshNow()
+        if !isPreview { model.refreshNow() }
+        if isPreview { NSApplication.shared.activate(ignoringOtherApps: true) }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }
 
-    private func showSettings() {
+    private func showSettings(pane: SettingsPane? = nil) {
         popover.performClose(nil)
+        if let pane { settingsNavigation.pane = pane }
         if settingsWindow == nil {
             let controller = NSHostingController(
                 rootView: SettingsView(
                     model: model,
                     store: model.settingsStore,
-                    notifications: model.notifications
+                    notifications: model.notifications,
+                    navigation: settingsNavigation,
+                    showOnboarding: { [weak self] in
+                        self?.settingsWindow?.close()
+                        self?.showOnboarding()
+                    }
                 )
             )
             let window = NSWindow(contentViewController: controller)
             window.title = "LiquidBar"
+            window.appearance = previewAppearance
             window.styleMask = [.titled, .closable, .miniaturizable]
             window.isReleasedWhenClosed = false
             window.center()
@@ -144,6 +193,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         NSApplication.shared.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    private func handlePermissionAudit(_ audit: PermissionAudit) {
+        let store = model.settingsStore
+        guard audit.needsAttention else {
+            // Forget the previous shortfall so a later permission loss prompts again.
+            if store.value.lastPermissionPromptFingerprint != nil {
+                store.value.lastPermissionPromptFingerprint = nil
+            }
+            if store.value.setupCompleted != true {
+                store.value.setupCompleted = true
+            }
+            return
+        }
+        guard store.value.lastPermissionPromptFingerprint != audit.fingerprint else { return }
+        store.value.lastPermissionPromptFingerprint = audit.fingerprint
+        showOnboarding(step: audit.onboardingStep)
+    }
+
+    private func showOnboarding(step: Int? = nil) {
+        popover.performClose(nil)
+        if onboardingWindow == nil {
+            let controller = NSHostingController(
+                rootView: OnboardingView(
+                    model: model,
+                    notifications: model.notifications,
+                    startAt: step
+                ) { [weak self] in
+                    self?.onboardingWindow?.close()
+                    self?.onboardingWindow = nil
+                }
+            )
+            let window = NSWindow(contentViewController: controller)
+            window.title = L10n.text("setupAssistant")
+            window.appearance = previewAppearance
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            onboardingWindow = window
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        onboardingWindow?.makeKeyAndOrderFront(nil)
     }
 }
 
@@ -153,17 +244,7 @@ enum MenuBarTemperatureRenderer {
         guard let level else { return .secondaryLabelColor }
         return NSColor(name: nil) { appearance in
             let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            switch level {
-            case .normal:
-                return dark ? NSColor(srgbRed: 0.40, green: 0.85, blue: 0.82, alpha: 1)
-                            : NSColor(srgbRed: 0.02, green: 0.36, blue: 0.40, alpha: 1)
-            case .warning:
-                return dark ? NSColor(srgbRed: 1, green: 0.74, blue: 0.40, alpha: 1)
-                            : NSColor(srgbRed: 0.60, green: 0.30, blue: 0, alpha: 1)
-            case .critical:
-                return dark ? NSColor(srgbRed: 1, green: 0.49, blue: 0.52, alpha: 1)
-                            : NSColor(srgbRed: 0.70, green: 0.12, blue: 0.18, alpha: 1)
-            }
+            return Theme.sensorNSColor(level, dark: dark)
         }
     }
 

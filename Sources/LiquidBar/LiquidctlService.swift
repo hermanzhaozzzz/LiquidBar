@@ -126,6 +126,10 @@ actor LiquidctlService {
         ])
     }
 
+    func setPumpAutomatic() throws {
+        _ = try request(["action": "pump_auto"])
+    }
+
     func apply(fans: [Int]?, pump: Int?, curve: Bool = false) throws {
         var payload: [String: Any] = ["action": "apply", "curve": curve]
         if let fans { payload["fans"] = fans.map { min(100, max(30, $0)) } }
@@ -282,7 +286,7 @@ actor LiquidctlService {
         AppLogger.shared.log("liquidctl helper started with \(python.path)")
     }
 
-    private func pythonExecutable() -> URL? {
+    nonisolated static var availablePython: URL? {
         let candidates = [
             "/usr/local/opt/liquidctl/libexec/bin/python",
             "/usr/local/opt/liquidctl/libexec/bin/python3",
@@ -292,6 +296,10 @@ actor LiquidctlService {
         return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }).map {
             URL(fileURLWithPath: $0)
         }
+    }
+
+    private func pythonExecutable() -> URL? {
+        Self.availablePython
     }
 
     private func helperScript() -> URL? {

@@ -33,6 +33,8 @@ fi
 /bin/cp "$binary_dir/LiquidBar" "$contents_path/MacOS/LiquidBar"
 /bin/cp "$repo_root/Resources/Info.plist" "$contents_path/Info.plist"
 /bin/cp "$repo_root/Resources/device_helper.py" "$contents_path/Resources/device_helper.py"
+/bin/mkdir -p "$contents_path/Resources/FanControlService"
+/bin/cp "$repo_root/scripts/fan_service_admin.py" "$contents_path/Resources/FanControlService/fan_service_admin.py"
 
 for spec in \
   "16 icon_16x16.png" "32 icon_16x16@2x.png" \
@@ -50,7 +52,9 @@ done
 /bin/mkdir -p "$service_package"
 /bin/cp "$binary_dir/$service_product" "$service_package/$service_product"
 /usr/bin/codesign --force --options runtime --timestamp=none --sign - "$service_package/$service_product"
-/usr/bin/codesign --force --deep --options runtime --timestamp=none --sign - "$app_path"
+/bin/cp "$service_package/$service_product" "$contents_path/Resources/FanControlService/$service_product"
+/usr/bin/codesign --force --options runtime --timestamp=none --sign - "$contents_path/Resources/FanControlService/$service_product"
+/usr/bin/codesign --force --options runtime --timestamp=none --sign - "$app_path"
 /usr/bin/python3 "$repo_root/scripts/build_service_manifest.py" "$app_path" "$service_package"
 print "$app_path"
 print "$service_package"

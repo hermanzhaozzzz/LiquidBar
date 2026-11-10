@@ -7,10 +7,10 @@ func defaultPresetsAndSafetyLimits() {
     var settings = AppSettings()
     #expect(settings.showLiquidTemperatureInMenuBar == false)
     #expect(settings.menuBarTemperatureDisplay == .cpu)
-    #expect(settings.presets[.quiet] == CoolingPreset(fanDuty: 35, pumpDuty: 60))
-    #expect(settings.presets[.daily] == CoolingPreset(fanDuty: 50, pumpDuty: 70))
-    #expect(settings.presets[.performance] == CoolingPreset(fanDuty: 75, pumpDuty: 90))
-    #expect(settings.presets[.full] == CoolingPreset(fanDuty: 100, pumpDuty: 100))
+    #expect(settings.presets[.quiet] == CoolingPreset(fanDuty: 35, pumpDuty: 60, radiatorDuty: 40))
+    #expect(settings.presets[.daily] == CoolingPreset(fanDuty: 50, pumpDuty: 70, radiatorDuty: 55))
+    #expect(settings.presets[.performance] == CoolingPreset(fanDuty: 75, pumpDuty: 90, radiatorDuty: 80))
+    #expect(settings.presets[.full] == CoolingPreset(fanDuty: 100, pumpDuty: 100, radiatorDuty: 100))
 
     settings.manualFanDuty = [0, 101, 20]
     settings.manualPumpDuty = 10
@@ -35,7 +35,7 @@ func olderSettingsDecodeWithoutMenuBarPreference() throws {
 
     #expect(decoded.showLiquidTemperatureInMenuBar == false)
     #expect(decoded.menuBarTemperatureDisplay == .cpu)
-    #expect(decoded.presets[.performance] == CoolingPreset(fanDuty: 75, pumpDuty: 90))
+    #expect(decoded.presets[.performance] == CoolingPreset(fanDuty: 75, pumpDuty: 90, radiatorDuty: 80))
 }
 
 @Test @MainActor

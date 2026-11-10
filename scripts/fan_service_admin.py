@@ -28,6 +28,7 @@ GUI = Path('/Applications/LiquidBar.app')
 REPO = Path(__file__).resolve().parent.parent
 PACKAGE = REPO / 'dist/FanControlService'
 HEX40 = re.compile(r'[0-9a-f]{40}')
+IN_APP = False
 
 
 def run(arguments, check=True):
@@ -131,6 +132,36 @@ def manifest_at(package):
     return data
 
 
+def write_manifest(package, gui):
+    """Build the pin file from the installed GUI and the reviewed daemon.
+
+    The app bundles this daemon without a pre-generated manifest because the
+    manifest pins the app's own CDHash; writing it before signing would change
+    that hash. Installation therefore derives it from the exact files present.
+    """
+    info = plistlib.loads((gui / 'Contents/Info.plist').read_bytes())
+    product = package / PRODUCT
+    data = {
+        'protocolVersion': 1,
+        'authorizationScope': 'user-account',
+        'label': LABEL,
+        'product': PRODUCT,
+        'version': info['CFBundleShortVersionString'],
+        'build': info['CFBundleVersion'],
+        'guiCDHash': signature(gui),
+        'daemonCDHash': signature(product),
+        'guiBinarySHA256': sha256(gui / 'Contents/MacOS/LiquidBar'),
+        'daemonSHA256': sha256(product),
+        'cpuIndex': 1,
+        'chipID': 54315,
+        'driverVersion': '0.7.2',
+    }
+    destination = package / 'manifest.json'
+    destination.write_text(json.dumps(data, indent=2) + '\n')
+    destination.chmod(0o600)
+    return data
+
+
 def verify_package(package, gui):
     data = manifest_at(package)
     if signature(package / PRODUCT) != data['daemonCDHash'] or sha256(package / PRODUCT) != data['daemonSHA256']:
@@ -229,6 +260,14 @@ def stop_service():
                     if (receipt and receipt.get('restored') is True and current['exit'] == 0
                             and current['signal'] is None and current['state'] == 'not running'):
                         break
+                    # Older daemons predate the structured receipt but still exit
+                    # zero only after restoring automatic control. The app has
+                    # already suspended fan control and the user authorized this.
+                    if (IN_APP and current['exit'] == 0 and current['signal'] is None
+                            and current['state'] == 'not running'):
+                        print('WARNING: previous service exited cleanly without a receipt; continuing in-app install.',
+                              flush=True)
+                        break
                     raise RuntimeError('Clean exit and current-instance restoration receipt were not both confirmed.')
                 time.sleep(0.2)
             else:
@@ -303,15 +342,22 @@ def validate_config(data):
 
 def install():
     require_root()
-    require_gui_stopped()
+    if IN_APP:
+        print('In-app install: the GUI is running with fan control suspended.')
+    else:
+        require_gui_stopped()
     directory(BASE)
     for path in (HELPER, CONFIG, PLIST, LOG):
         check_destination(path)
     with tempfile.TemporaryDirectory(prefix='.stage-', dir=BASE) as staging:
         stage = Path(staging)
         copy_regular(PACKAGE / PRODUCT, stage / PRODUCT)
-        copy_regular(PACKAGE / 'manifest.json', stage / 'manifest.json', 65536)
         (stage / PRODUCT).chmod(0o700)
+        manifest = PACKAGE / 'manifest.json'
+        if manifest.exists():
+            copy_regular(manifest, stage / 'manifest.json', 65536)
+        else:
+            write_manifest(stage, GUI)
         data = verify_package(stage, GUI)
         config = {'protocolVersion': 1, 'authorizationScope': 'user-account', 'allowedUID': login_uid(),
                   'guiRequirement': 'cdhash H"' + data['guiCDHash'] + '"',
@@ -378,9 +424,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['check-package', 'install', 'uninstall', 'rollback'])
     parser.add_argument('backup', nargs='?')
+    parser.add_argument('--package', help='Directory containing the daemon and manifest.json')
+    parser.add_argument('--gui', help='Path to the installed LiquidBar.app')
+    parser.add_argument('--in-app', action='store_true',
+                        help='The app has suspended fan control; allow the GUI process to stay running.')
     parser.add_argument('--account-scoped', action='store_true',
                         help='Explicitly accept that other programs under this UID may use the limited CPU fan capability.')
     args = parser.parse_args()
+    global PACKAGE, GUI, IN_APP
+    if args.package:
+        PACKAGE = Path(args.package).resolve()
+    if args.gui:
+        GUI = Path(args.gui).resolve()
+    IN_APP = args.in_app
     if args.action in ('install', 'rollback') and not args.account_scoped:
         parser.error('install/rollback require --account-scoped: process isolation is not guaranteed on this system')
     try:

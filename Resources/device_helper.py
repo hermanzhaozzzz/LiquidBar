@@ -28,6 +28,7 @@ from liquidctl.driver import find_liquidctl_devices
 logging.getLogger("liquidctl").setLevel(logging.CRITICAL)
 logger = logging.getLogger(__name__)
 FAN_MINIMUM, PUMP_MINIMUM = 30, 50
+PUMP_AUTO_PROFILE = [(20, 50), (30, 60), (40, 80), (50, 100)]
 CURVE_TIMEOUT = 15.0
 PRODUCTS = {
     "smart": (0x1E71, {0x2006, 0x200D, 0x200F}),
@@ -372,6 +373,9 @@ class DeviceManager:
             },
         }
 
+    def set_pump_auto(self) -> None:
+        self.require("kraken").set_speed_profile("pump", PUMP_AUTO_PROFILE)
+
     def set_speed(self, role: str, channel: str, duty: Any) -> None:
         if role == "smart" and channel in {"fan1", "fan2", "fan3", "sync"}:
             minimum = FAN_MINIMUM
@@ -576,6 +580,9 @@ def dispatch(command: dict[str, Any]) -> dict[str, Any]:
         manager.disconnect_all()
         manager.discover(force=True)
         return manager.status()
+    if action == "pump_auto":
+        manager.set_pump_auto()
+        return {"applied": True}
     if action == "set":
         if command.get("device") == "smart" and manager.curve_deadline is not None:
             safe = manager.failsafe("manual channel override")

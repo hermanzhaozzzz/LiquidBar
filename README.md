@@ -3,8 +3,8 @@
 [简体中文](README.zh-CN.md)
 
 LiquidBar is a native macOS menu-bar monitor and controller for individually
-detected cooling, lighting, and numeric-display devices. Version 0.2.0 no longer
-requires a Kraken to use a Smart Device V2.
+detected cooling, lighting, and numeric-display devices. A Kraken is not
+required to use a Smart Device V2.
 
 ## Device interfaces
 
@@ -37,6 +37,10 @@ change the BIOS PWM/DC mode.
 
 - CPU sampling and 24-hour history are independent of USB and motherboard
   authorization. CPU data is never substituted for missing coolant temperature.
+- Settings → General → Update frequency offers Smooth, Balanced (default) and
+  Eco: CPU/GPU telemetry every 1, 2 or 4 seconds; USB devices every 1/2/3 seconds
+  while the panel is open and 3/5/6 seconds while it is closed. History remains
+  at 5 seconds. Eco reduces wakeups but adds menu-bar and alert latency.
 - GPU temperature and fan feedback appear in the main fan panel and are sampled
   independently of USB and motherboard authorization. GPU temperature is also
   recorded in history. The GPU fan row is monitoring-only: no macOS fan write
@@ -45,20 +49,35 @@ change the BIOS PWM/DC mode.
 - Targets and measured RPM/duty are separate. Manual presets disable the Smart
   CPU-temperature curve. This software curve is not uploaded to the controller
   as an autonomous curve.
+- Each controllable cooling row shows its current mode. Dragging a slider switches
+  that channel to manual. The radiator switch restores motherboard automatic
+  control; the Kraken pump switch uses a hardware coolant-temperature curve. The
+  three NZXT channels share the software CPU curve, so their auto switch is
+  group-level. GPU fans stay monitoring-only because macOS has no verified
+  restorable write interface.
 - An armed Smart curve renews a 15-second helper lease. Lost updates, parent EOF
   or normal termination trigger a best-effort full-speed request on all three
-  channels. Explicitly switching the curve off also requests full speed; manual
+  channels. Explicitly switching the curve off freezes the current curve duty as
+  manual targets; only an unconfirmed write falls back to full speed. Manual
   presets instead apply their chosen targets. USB failure, a hung driver or a
   forcibly killed helper can prevent this fallback, so physical verification
   remains necessary.
-- Lighting is configured in Settings. Connect cooler ARGB to the appropriate
-  motherboard 5 V ARGB header, not a proprietary NZXT lighting connector.
+- Lighting is configured in Settings. Settings → Lighting → **Show color groups
+  in the panel** turns the menu-bar panel into two columns: speed and status on
+  the left, all lighting color groups on the right. Changes apply automatically.
+  The right column starts with an **All lighting** card that applies color,
+  effect and brightness to every group; each group can then be adjusted
+  separately. A group with a single channel does not offer “All channels”.
+  Connect cooler ARGB to the
+  appropriate motherboard 5 V ARGB header, not a proprietary NZXT lighting connector.
 - Motherboard fans remain under existing firmware control by default. The main
   panel has a separate Radiator Fan slider for a confirmed CPU_FAN header
   (30–100%), with measured RPM/duty, automatic/manual state and a button to
   restore motherboard automatic control. Confirming the CPU header does not enable pump
   control. The driver can authorize access for the worker-process lifetime.
-  Smart presets and temperature curves do not yet include the motherboard fan.
+  Presets include the verified CPU_FAN radiator target; the software Smart
+  temperature curve still covers only the NZXT fans. The Kraken pump is not
+  changed by presets.
 - An independent worker attempts to restore only the motherboard channels it
   overrides after app exit, lost heartbeat or pipe closure. Restoration failures
   are reported. This cannot cover kernel crashes, power loss or SIGKILL of the
@@ -76,20 +95,29 @@ change the BIOS PWM/DC mode.
 ```bash
 swift test
 /usr/local/opt/liquidctl/libexec/bin/python -m unittest discover -s Tests/Python
-./scripts/build_app.sh
+./scripts/build_dmg.sh
 ```
 
 On Apple Silicon use `/opt/homebrew/opt/liquidctl/libexec/bin/` for Python.
 The app locates either prefix and does not install dependencies. The generated
 `dist/LiquidBar.app` is ad-hoc signed for local use, not Developer-ID notarized.
 
-```bash
-./scripts/install_app.sh
-```
+## Install
 
-The installer replaces `/Applications/LiquidBar.app` and launches it. Back up
-that app and `~/Library/Application Support/LiquidBar/` before an upgrade.
-Settings, logs and history remain in that Application Support directory.
+Open `dist/LiquidBar-<version>.dmg`, drag **LiquidBar.app** to Applications and
+launch it. When upgrading, quit the running LiquidBar from its menu first and
+wait for its workers to finish. Gatekeeper may require System Settings →
+Privacy & Security → “Open Anyway” for the ad-hoc signature.
+
+On first launch the Setup Assistant checks liquidctl, the CPU temperature sensor,
+the GPU and connected devices, then requests notification permission and the
+login-item registration. It can be reopened from **Settings → Setup Assistant**
+at any time. Settings, logs and history live in
+`~/Library/Application Support/LiquidBar/`; back that directory up before an
+upgrade.
+
+For development, `./scripts/install_app.sh` copies `dist/LiquidBar.app` to
+`/Applications` and launches it.
 
 ## Optional persistent CPU fan service
 
@@ -107,18 +135,23 @@ Installation requires explicit acceptance of account scope. The service remains
 limited to CPU_FAN at 30–100% and restoration of automatic control; it exposes no
 arbitrary root command, file-write or driver-selector interface and does not change EFI.
 
-The build also produces `dist/FanControlService/`. Install the GUI from the same
-build before installing the service:
+The app carries the matching service package inside its bundle. Install or update
+it from **Settings → Motherboard → Install/Update fan service**. LiquidBar quits,
+restores automatic fan control, asks macOS for administrator rights, installs the
+service and reopens itself. Nothing outside the app has to be run by hand.
 
-```bash
-./scripts/install_app.sh
-```
-
-Quit LiquidBar normally from its menu and wait for its workers to exit, then run:
+For repository development the equivalent CLI remains:
 
 ```bash
 sudo ./scripts/install_fan_service.sh --account-scoped
 ```
+
+When LiquidBar is replaced by a different build, the installed service is pinned
+to the old code hash and the app shows **Needs update**. The app also compares the
+running process and the on-disk bundle against the service requirement: a stale
+process after an in-place app replacement shows **Restart required** with a restart
+action instead of a raw signature error. The launch permission check asks once;
+upgrades are never accepted automatically.
 
 The GUI and daemon retain hardened runtime and exact code-signature checks as
 additional constraints. Installation records their signatures, the current login

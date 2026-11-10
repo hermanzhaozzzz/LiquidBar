@@ -16,8 +16,11 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
-      - name: Validate helper
-        run: python3 -m py_compile Resources/device_helper.py
+      - name: Validate helper and scripts
+        run: |
+          python3 -m py_compile Resources/device_helper.py scripts/fan_service_admin.py scripts/build_service_manifest.py
+          zsh -n scripts/build_dmg.sh
+          zsh -n scripts/build_app.sh
       - name: Validate documentation links
         run: |
           test -f README.md

@@ -4,6 +4,9 @@ enum AppVersion {
     static let current = Bundle.main.object(
         forInfoDictionaryKey: "CFBundleShortVersionString"
     ) as? String ?? "development"
+    static let build = Bundle.main.object(
+        forInfoDictionaryKey: "CFBundleVersion"
+    ) as? String ?? "development"
 }
 
 enum PresetID: String, Codable, CaseIterable, Identifiable {
@@ -18,6 +21,7 @@ enum PresetID: String, Codable, CaseIterable, Identifiable {
 struct CoolingPreset: Codable, Equatable {
     var fanDuty: Int
     var pumpDuty: Int
+    var radiatorDuty: Int?
 }
 
 struct AlertThresholds: Codable, Equatable {
@@ -28,6 +32,38 @@ struct AlertThresholds: Codable, Equatable {
     var triggerDelay: TimeInterval = 15
     var hysteresis: Double = 3
     var recoveryDelay: TimeInterval = 60
+}
+
+enum SamplingProfile: String, Codable, CaseIterable, Identifiable {
+    case fast
+    case balanced
+    case eco
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .fast: return L10n.text("samplingFast")
+        case .balanced: return L10n.text("samplingBalanced")
+        case .eco: return L10n.text("samplingEco")
+        }
+    }
+
+    var telemetryInterval: TimeInterval {
+        switch self {
+        case .fast: return 1
+        case .balanced: return 2
+        case .eco: return 4
+        }
+    }
+
+    func deviceInterval(popoverOpen: Bool) -> TimeInterval {
+        switch self {
+        case .fast: return popoverOpen ? 1 : 3
+        case .balanced: return popoverOpen ? 2 : 5
+        case .eco: return popoverOpen ? 3 : 6
+        }
+    }
 }
 
 enum MenuBarTemperatureDisplay: String, Codable, CaseIterable, Identifiable {
@@ -95,23 +131,28 @@ struct AppSettings: Codable, Equatable {
     // Optional for backward-compatible decoding of settings written by older versions.
     var showLiquidTemperatureInMenuBar: Bool? = false
     var menuBarTemperatureDisplay: MenuBarTemperatureDisplay? = .cpu
+    var samplingProfile: SamplingProfile? = .balanced
+    var setupCompleted: Bool? = false
+    var lastPermissionPromptFingerprint: String?
     var notificationsEnabled = false
     var criticalSoundEnabled = true
     var automaticEmergencyBoost = false
     var linkedFans = false
     var fanNames = ["Fan 1", "Fan 2", "Fan 3"]
     var presets: [PresetID: CoolingPreset] = [
-        .quiet: CoolingPreset(fanDuty: 35, pumpDuty: 60),
-        .daily: CoolingPreset(fanDuty: 50, pumpDuty: 70),
-        .performance: CoolingPreset(fanDuty: 75, pumpDuty: 90),
-        .full: CoolingPreset(fanDuty: 100, pumpDuty: 100),
+        .quiet: CoolingPreset(fanDuty: 35, pumpDuty: 60, radiatorDuty: 40),
+        .daily: CoolingPreset(fanDuty: 50, pumpDuty: 70, radiatorDuty: 55),
+        .performance: CoolingPreset(fanDuty: 75, pumpDuty: 90, radiatorDuty: 80),
+        .full: CoolingPreset(fanDuty: 100, pumpDuty: 100, radiatorDuty: 100),
     ]
     var thresholds = AlertThresholds()
     var lastPreset: PresetID? = .daily
     var manualFanDuty = [50, 50, 50]
     var manualPumpDuty = 70
+    var pumpAutomatic: Bool? = false
     var fanCurve: FanCurveSettings?
     var lighting: [String: LightingSettings]?
+    var showLightingInPanel: Bool? = false
     var display: DisplaySettings?
     var motherboardMapping: MotherboardMappingSettings?
     var temporaryMotherboardControl: Bool?
@@ -119,28 +160,33 @@ struct AppSettings: Codable, Equatable {
     mutating func sanitize() {
         showLiquidTemperatureInMenuBar = showLiquidTemperatureInMenuBar ?? false
         menuBarTemperatureDisplay = menuBarTemperatureDisplay ?? .cpu
+        samplingProfile = samplingProfile ?? .balanced
+        setupCompleted = setupCompleted ?? false
         fanNames = Array((fanNames + ["Fan 1", "Fan 2", "Fan 3"]).prefix(3))
         manualFanDuty = Array((manualFanDuty + [50, 50, 50]).prefix(3)).map {
             min(100, max(30, $0))
         }
         manualPumpDuty = min(100, max(50, manualPumpDuty))
+        pumpAutomatic = pumpAutomatic ?? false
+        showLightingInPanel = showLightingInPanel ?? false
         if var curve = fanCurve { curve.sanitize(); fanCurve = curve }
         for id in PresetID.allCases {
             let fallback = AppSettings.defaultPreset(id)
             let preset = presets[id] ?? fallback
             presets[id] = CoolingPreset(
                 fanDuty: min(100, max(30, preset.fanDuty)),
-                pumpDuty: min(100, max(50, preset.pumpDuty))
+                pumpDuty: min(100, max(50, preset.pumpDuty)),
+                radiatorDuty: min(100, max(30, preset.radiatorDuty ?? fallback.radiatorDuty ?? 55))
             )
         }
     }
 
     static func defaultPreset(_ id: PresetID) -> CoolingPreset {
         switch id {
-        case .quiet: return CoolingPreset(fanDuty: 35, pumpDuty: 60)
-        case .daily: return CoolingPreset(fanDuty: 50, pumpDuty: 70)
-        case .performance: return CoolingPreset(fanDuty: 75, pumpDuty: 90)
-        case .full: return CoolingPreset(fanDuty: 100, pumpDuty: 100)
+        case .quiet: return CoolingPreset(fanDuty: 35, pumpDuty: 60, radiatorDuty: 40)
+        case .daily: return CoolingPreset(fanDuty: 50, pumpDuty: 70, radiatorDuty: 55)
+        case .performance: return CoolingPreset(fanDuty: 75, pumpDuty: 90, radiatorDuty: 80)
+        case .full: return CoolingPreset(fanDuty: 100, pumpDuty: 100, radiatorDuty: 100)
         }
     }
 }
