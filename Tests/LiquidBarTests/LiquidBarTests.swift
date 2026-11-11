@@ -193,9 +193,11 @@ func wrongRequestIDResetsSessionWithoutReplayingWrite() async throws {
 
 @Test
 func timeoutDiscardsLateResponseBeforeNextRequest() async throws {
-    let (directory, helper) = try fakeHelper("time.sleep(2)")
+    let (directory, helper) = try fakeHelper("time.sleep(8)")
     defer { try? FileManager.default.removeItem(at: directory) }
-    let service = LiquidctlService(executable: URL(fileURLWithPath: "/usr/bin/python3"), helper: helper, timeout: 0.6)
+    // The request after the timeout spawns a fresh Python helper, so the timeout
+    // must also cover interpreter startup on a loaded CI runner.
+    let service = LiquidctlService(executable: URL(fileURLWithPath: "/usr/bin/python3"), helper: helper, timeout: 3)
     do {
         _ = try await service.status()
         Issue.record("Delayed response must time out")
