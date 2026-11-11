@@ -102,6 +102,11 @@ On Apple Silicon use `/opt/homebrew/opt/liquidctl/libexec/bin/` for Python.
 The app locates either prefix and does not install dependencies. The generated
 `dist/LiquidBar.app` is ad-hoc signed for local use, not Developer-ID notarized.
 
+`.pre-commit-config.yaml` mirrors the CI job: `swift build`, `swift test`, the
+helper syntax checks and the README cross-link check. Install it once with
+`prek install` (or `uvx prek install`) so those run before every commit; they
+take about 15 seconds against a warm build.
+
 ## Install
 
 Open `dist/LiquidBar-<version>.dmg`, drag **LiquidBar.app** to Applications and

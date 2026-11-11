@@ -1,0 +1,44 @@
+default_install_hook_types: [pre-commit]
+
+# Mirrors the CI build-and-test job so a commit cannot reach main in a state
+# the workflow would reject.
+repos:
+  - repo: local
+    hooks:
+      - id: swift-build
+        name: Swift build
+        entry: swift build
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: swift-test
+        name: Swift tests
+        entry: swift test
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: python-compile
+        name: Python helper syntax
+        entry: python3 -m py_compile
+        language: system
+        types_or: [python]
+        stages: [pre-commit]
+
+      - id: zsh-syntax
+        name: zsh syntax
+        entry: zsh -n
+        language: system
+        types_or: [shell]
+        stages: [pre-commit]
+
+      - id: documentation-links
+        name: Documentation links
+        entry: bash -c 'test -f README.md && test -f README.zh-CN.md && grep -q "README.zh-CN.md" README.md && grep -q "README.md" README.zh-CN.md'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
